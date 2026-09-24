@@ -1,3 +1,4 @@
+import pytest
 import json
 
 from jermes.engine import Verdict
@@ -84,3 +85,31 @@ def test_log_row_contents(make_engine):
     assert row["action"] == "allow" and row["applied"] == 1 and row["input_tokens"] == 123
     assert json.loads(row["answers_json"])["u"]["noul"] == 0.1
     assert json.loads(row["detail_json"])["k"] == 1
+
+
+@pytest.mark.parametrize("env,expected", [
+    ({"AI_GATEWAY_API_KEY": "v"}, "vercel"),
+    ({"OPENROUTER_API_KEY": "o"}, "openrouter"),
+    ({"TYPESAFE_API_KEY": "t", "OPENROUTER_API_KEY": "o"}, "typesafe"),  # Jev-specific key beats a general one
+    ({"AI_GATEWAY_API_KEY": "v", "OPENROUTER_API_KEY": "o"}, "vercel"),
+    ({}, "vercel"),
+])
+def test_auto_backend_detection(tmp_path, monkeypatch, env, expected):
+    from jermes.config import load_config
+
+    monkeypatch.setenv("JERMES_CONFIG", str(tmp_path / "none.yaml"))
+    for k in ("AI_GATEWAY_API_KEY", "OPENROUTER_API_KEY", "TYPESAFE_API_KEY", "JERMES_BACKEND"):
+        monkeypatch.delenv(k, raising=False)
+    for k, v in env.items():
+        monkeypatch.setenv(k, v)
+    assert load_config()["backend"]["name"] == expected
+
+
+def test_explicit_backend_beats_auto(tmp_path, monkeypatch):
+    from jermes.config import load_config
+
+    p = tmp_path / "c.yaml"
+    p.write_text("backend: {name: openrouter}\n")
+    monkeypatch.setenv("JERMES_CONFIG", str(p))
+    monkeypatch.setenv("AI_GATEWAY_API_KEY", "v")
+    assert load_config()["backend"]["name"] == "openrouter"

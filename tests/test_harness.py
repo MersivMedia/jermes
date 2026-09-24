@@ -168,19 +168,14 @@ def test_model_router_without_cheap_model_is_inert(make_engine, fake):
     assert h.llm_request_middleware(request={"model": "big"}, session_id="s") is None
 
 
-def test_skill_suggest_advise_two_stage(make_engine, fake):
-    roster = [
-        skill_suggest.Skill("powerpoint", "Create, read, edit .pptx decks", "edit existing decks"),
-        skill_suggest.Skill("pptx-author", "Build decks with python-pptx", "author new decks"),
-        skill_suggest.Skill("apple-notes", "Manage Apple Notes", "notes"),
-    ]
-
+def _deck_ranker(fake, seen_states=None):
     def r(qid, q, state):
-        if qid.startswith("gate::"):
-            return {"type": "noul", "noul": 0.1 if qid.endswith("prose_suffices") else 0.9}
+        if seen_states is not None:
+            seen_states.append(state)
+        req = state.get("request", "") if isinstance(state, dict) else ""
         if qid == "which":
             opts = list(q["criteria"])
-            pick = "pptx-author" if "pptx-author" in opts else opts[0]
+            pick = "pptx-author" if ("pptx" in req or "deck" in state.get("recent_context", "")) else skill_suggest.NONE_OPTION
             probs = {o: (0.8 if o == pick else 0.2 / (len(opts) - 1)) for o in opts}
             return {"type": "choice", "choice": pick, "probabilities": probs, "confidence": 0.7}
         if qid.startswith("fits::"):
@@ -188,20 +183,46 @@ def test_skill_suggest_advise_two_stage(make_engine, fake):
         return None
 
     fake.on(r)
+
+
+DECK_ROSTER = [
+    skill_suggest.Skill("powerpoint", "Create, read, edit .pptx decks", "edit existing decks"),
+    skill_suggest.Skill("pptx-author", "Build decks with python-pptx", "author new decks"),
+    skill_suggest.Skill("apple-notes", "Manage Apple Notes", "notes"),
+]
+
+
+def test_skill_suggest_advise_two_stage(make_engine, fake):
+    _deck_ranker(fake)
     h = Harness(make_engine(skill_suggest="advise", model_router="off"))
-    h._roster = roster
+    h._roster = DECK_ROSTER
     out = h.on_pre_llm_call(session_id="s", user_message="make me a pitch deck as a .pptx")
     assert out and "pptx-author" in out["context"]
-    assert len(fake.requests) == 2  # skim + rerank
+    assert len(fake.requests) == 2  # skim + select
 
 
-def test_skill_suggest_gate_says_none(make_engine, fake):
-    fake.on(lambda qid, q, s: {"type": "noul", "noul": 0.9 if qid.endswith("prose_suffices") else 0.05}
-            if qid.startswith("gate::") else None)
+def test_skill_suggest_none_option_stops_after_skim(make_engine, fake):
+    _deck_ranker(fake)
     h = Harness(make_engine(skill_suggest="advise", model_router="off"))
-    h._roster = [skill_suggest.Skill("a", "x"), skill_suggest.Skill("b", "y")]
+    h._roster = DECK_ROSTER
     out = h.on_pre_llm_call(session_id="s", user_message="explain what a monad is")
-    assert "No skill" in out["context"] and len(fake.requests) == 1
+    assert "No skill is needed" in out["context"] and len(fake.requests) == 1
+
+
+def test_skill_suggest_uses_conversation_history(make_engine, fake):
+    states = []
+    _deck_ranker(fake, states)
+    h = Harness(make_engine(skill_suggest="advise", model_router="off"))
+    h._roster = DECK_ROSTER
+    history = [
+        {"role": "user", "content": "I need a board deck for Friday"},
+        {"role": "assistant", "content": "Sure, what should the deck cover?"},
+        {"role": "user", "content": "yes go ahead and build it"},
+    ]
+    out = h.on_pre_llm_call(session_id="s", user_message="yes go ahead and build it", conversation_history=history)
+    assert "pptx-author" in out["context"]  # only resolvable through the earlier turns
+    ctx = states[0]["recent_context"]
+    assert "board deck" in ctx and "go ahead and build it" not in ctx  # request is not duplicated as context
 
 
 @pytest.mark.parametrize("hook", ["on_pre_tool_call", "on_transform_tool_result", "on_pre_llm_call"])

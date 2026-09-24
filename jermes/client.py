@@ -38,6 +38,15 @@ BACKENDS: Dict[str, Dict[str, str]] = {
         "api_key_env": "TYPESAFE_API_KEY",
         "model": "jev-1.13.0",
     },
+    # OpenRouter serves Jev through its System One API, which implements
+    # TypeSafe's request/response shapes (POST {base}/v1/systemone). Jev is not
+    # in OpenRouter's chat /models catalog. Docs:
+    # https://openrouter.ai/docs/guides/community/typesafe-sdk
+    "openrouter": {
+        "base_url": "https://openrouter.ai/api",
+        "api_key_env": "OPENROUTER_API_KEY",
+        "model": "typesafe/jev-1.13",
+    },
 }
 
 RETRYABLE_STATUS = {429, 500, 502, 503, 504, 529}

@@ -56,7 +56,8 @@ class Harness:
 
     # ------------------------------------------------------------------ turn
 
-    def on_pre_llm_call(self, session_id: str = "", user_message: str = "", **kw: Any) -> Optional[Dict[str, str]]:
+    def on_pre_llm_call(self, session_id: str = "", user_message: str = "", conversation_history: Any = None,
+                        **kw: Any) -> Optional[Dict[str, str]]:
         """Once per user turn. Records the request, routes the model, suggests a skill."""
         try:
             self.history.set_request(session_id, user_message or "")
@@ -64,7 +65,8 @@ class Harness:
                 self._last_result.pop(session_id, None)
                 self._route.pop(session_id, None)
             self._route_turn(session_id, user_message or "")
-            block = self._suggest_skill(session_id, user_message or "")
+            history = conversation_history if isinstance(conversation_history, list) else None
+            block = self._suggest_skill(session_id, user_message or "", history)
             return {"context": block} if block else None
         except Exception:
             logger.debug("jermes pre_llm_call failed", exc_info=True)
@@ -87,17 +89,17 @@ class Harness:
                 self._route[session_id] = str(cheap)
             self.engine.mark_applied(d)
 
-    def _suggest_skill(self, session_id: str, user_message: str) -> Optional[str]:
+    def _suggest_skill(self, session_id: str, user_message: str, history: Optional[list] = None) -> Optional[str]:
         point = "skill_suggest"
         if not self.engine.enabled(point) or not user_message.strip():
             return None
         if self.engine.mode(point) == "shadow" and self.background_shadow:
             try:
-                self._shadow_pool.submit(self.rank_skills, session_id, user_message)
+                self._shadow_pool.submit(self.rank_skills, session_id, user_message, history)
             except RuntimeError:
                 pass
             return None
-        ranking = self.rank_skills(session_id, user_message)
+        ranking = self.rank_skills(session_id, user_message, history)
         if ranking is None or self.engine.mode(point) not in ("advise", "enforce"):
             return None
         return skill_suggest.ranking_block(ranking)
@@ -107,12 +109,15 @@ class Harness:
             self._roster = skill_suggest.load_roster()
         return self._roster
 
-    def rank_skills(self, session_id: str, user_message: str) -> Optional[list]:
-        """Two-stage Jev ranking of the skill roster for one request.
+    def rank_skills(self, session_id: str, user_message: str, history: Optional[list] = None) -> Optional[list]:
+        """Filter the skill roster down to the skills worth loading for one request.
 
-        Returns a list of ``{"skill", "p", "fits"}`` dicts (most relevant
-        first; empty = "no skill applies"), or ``None`` when Jev could not be
-        consulted. Every step is logged regardless of mode.
+        ``history`` is the conversation before this request (Hermes passes it
+        to ``pre_llm_call``); a short window of it goes to Jev as context.
+
+        Returns a list of ``{"skill", "p", "fits"}`` dicts (primary first, then
+        supporting; empty = "no skill needed"), or ``None`` when Jev could not
+        be consulted. Every step is logged regardless of mode.
         """
         point = "skill_suggest"
         cfg = self.engine.point_config(point)
@@ -120,40 +125,45 @@ class Harness:
         if len(roster) < 2 or not (user_message or "").strip():
             return None
         by_name = {s.name: s for s in roster}
-        state = skill_suggest.state_for(user_message)
+        context = skill_suggest.format_context(
+            skill_suggest.history_before_request(history or [], user_message),
+            max_messages=int(cfg.get("context_messages", 4)),
+            chars_each=int(cfg.get("context_chars", 400)),
+        )
+        state = skill_suggest.state_for(user_message, context)
+        with_ctx = bool(context)
 
-        # Call 1: skim every skill (one Jev request per 255-skill chunk).
+        # Call 1: skim every skill (one Jev request per 254-skill chunk), with
+        # "no skill needed" as an option in each chunk.
         chunk_answers = []
-        gate = None
-        for qs in skill_suggest.skim_questions(roster):
+        for qs in skill_suggest.skim_questions(roster, with_context=with_ctx):
             d = self.engine.decide(point + ".skim", state, qs, _ranked,
                                    session_id=session_id, spec_version=skill_suggest.SPEC_VERSION)
             if not d.ok:
                 return None
             chunk_answers.append(d.answers)
-            if gate is None and "gate::prose_suffices" in d.answers:
-                gate = skill_suggest.gate_value(d.answers)
-        if gate is None:
-            return None
-        if gate < float(cfg.get("gate_threshold", 0.3)):
-            # The turn does not want an action taken. An explicit "nothing
-            # applies" counters the skill index's own "err on the side of loading".
+        none_wins, shortlist_p, p_none = skill_suggest.skim_verdict(chunk_answers, int(cfg.get("shortlist", 5)))
+        if none_wins:
+            # An explicit "nothing applies" counters the skill index's own
+            # "err on the side of loading".
             self.engine.store.log(session_id=session_id, point=point, mode=self.engine.mode(point),
                                   spec_version=skill_suggest.SPEC_VERSION, action="none",
-                                  detail_json=json.dumps({"reason": "gate", "gate": round(gate, 3)}))
+                                  detail_json=json.dumps({"reason": "skim chose no skill", "p_none": round(p_none, 3),
+                                                          "context_chars": len(context)}))
             return []
 
-        # Call 2: rerank the shortlist with full descriptions and SKILL.md excerpts.
-        shortlist = [n for n, _ in skill_suggest.merge_rankings(chunk_answers, int(cfg.get("shortlist", 5)))]
-        if len(shortlist) < 2:
-            return None
-        qs = skill_suggest.rerank_questions(shortlist, by_name, int(cfg.get("excerpt_chars", 700)))
+        # Call 2: select from the shortlist with full descriptions and SKILL.md excerpts.
+        shortlist = [n for n, _ in shortlist_p]
+        if not shortlist:
+            return []
+        qs = skill_suggest.select_questions(shortlist, by_name, int(cfg.get("excerpt_chars", 700)),
+                                            with_context=with_ctx)
         d = self.engine.decide(
             point, state, qs,
-            skill_suggest.make_rerank_policy(float(cfg.get("fits_threshold", 0.3)), shortlist,
-                                             int(cfg.get("max_ranked", 3))),
+            skill_suggest.make_select_policy(float(cfg.get("fits_threshold", 0.5)), shortlist,
+                                             int(cfg.get("max_listed", 4))),
             session_id=session_id, spec_version=skill_suggest.SPEC_VERSION,
-            log_detail={"gate": round(gate, 3), "shortlist": shortlist},
+            log_detail={"skim_p_none": round(p_none, 3), "shortlist": shortlist, "context_chars": len(context)},
         )
         if not d.ok:
             return None

@@ -63,13 +63,10 @@ def test_iter_turns_is_read_only(tmp_path):
 def _ranker(fake):
     def r(qid, q, state):
         req = state.get("request", "") if isinstance(state, dict) else ""
-        if qid.startswith("gate::"):
-            action = "pptx" in req
-            yes = qid.endswith("prose_suffices")
-            return {"type": "noul", "noul": (0.1 if action else 0.9) if yes else (0.9 if action else 0.1)}
         if qid == "which":
             opts = list(q["criteria"])
-            pick = "pptx-author" if "pptx-author" in opts else opts[0]
+            none = skill_suggest.NONE_OPTION
+            pick = ("pptx-author" if "pptx-author" in opts else opts[0]) if "pptx" in req else none
             probs = {o: (0.7 if o == pick else 0.3 / (len(opts) - 1)) for o in opts}
             return {"type": "choice", "choice": pick, "probabilities": probs, "confidence": 0.6}
         if qid.startswith("fits::"):
@@ -144,3 +141,30 @@ def test_replay_output_never_carries_secrets(tmp_path, make_engine, fake):
     report = replay.run(db, limit=10, harness=h, export=out, progress=lines.append)
     blob = "\n".join(lines) + json.dumps(report) + out.read_text() + json.dumps([r for r in fake.requests], default=str)
     assert key not in blob
+
+
+def test_replay_retries_failed_turns_after_cooldown(tmp_path, make_engine, fake):
+    import httpx
+
+    db = tmp_path / "state.db"
+    _db(db)
+    _ranker(fake)
+    state = {"down": True}  # the gateway is down until the cooldown has passed
+
+    def handler(request):
+        if state["down"]:
+            return httpx.Response(503, json={"error": {"message": "down", "type": "service_unavailable_error"}})
+        return fake.handler(request)
+
+    h = Harness(make_engine(skill_suggest="shadow"))
+    h._roster = [skill_suggest.Skill("pptx-author", "Build decks"), skill_suggest.Skill("apple-notes", "Notes")]
+    h.engine.client._transport = httpx.MockTransport(handler)
+    h.engine.client._http = None
+    slept = []
+
+    def cooldown(s):
+        slept.append(s)
+        state["down"] = False
+
+    rep = replay.replay_skills(h, list(replay.iter_turns(db)), sleep=cooldown, progress=None)
+    assert slept == [60.0] and rep["errors"] == 0 and rep["turns"] == 2

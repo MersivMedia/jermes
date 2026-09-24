@@ -45,6 +45,7 @@ class Turn:
     request: str
     loaded_skills: List[str] = field(default_factory=list)
     tool_calls: List[Dict[str, Any]] = field(default_factory=list)
+    history: List[Dict[str, Any]] = field(default_factory=list)  # messages before the request
 
 
 def default_db() -> Path:
@@ -111,7 +112,13 @@ def iter_turns(db: Path, *, limit: int = 50, min_chars: int = 15, since_days: Op
                             loaded.append(str(skill))
             if only_with_skill and not loaded:
                 continue
-            yield Turn(sid, mid, content, loaded, calls)
+            # Same shape Hermes passes to pre_llm_call as conversation_history.
+            prior = conn.execute(
+                "SELECT role, content FROM messages WHERE session_id=? AND id<? AND role IN ('user','assistant') "
+                "AND content IS NOT NULL ORDER BY id DESC LIMIT 12", (sid, mid)
+            ).fetchall()
+            history = [{"role": r, "content": c} for r, c in reversed(prior)]
+            yield Turn(sid, mid, content, loaded, calls, history)
             yielded += 1
             if yielded >= limit:
                 return
@@ -124,27 +131,57 @@ def _norm(name: str) -> str:
     return name.split(":")[-1].split("/")[-1].strip().lower()
 
 
-def replay_skills(harness: Harness, turns: List[Turn], *, progress=print) -> Dict[str, Any]:
+def _skill_row(harness: Harness, t: Turn, use_context: bool) -> Dict[str, Any]:
+    ranking = harness.rank_skills(f"replay:{t.session_id}", t.request, t.history if use_context else None)
+    shown = _redact(t.request)  # progress lines, reports and exports never carry raw secrets
+    ranked = [r["skill"] for r in (ranking or [])]
+    loaded = [s for s in dict.fromkeys(t.loaded_skills)]
+    first = _norm(loaded[0]) if loaded else None
+    return {
+        "session_id": t.session_id,
+        "message_id": t.message_id,
+        "request": shown[:500],
+        "agent_loaded": loaded,
+        "jev_ranking": ranking,
+        "error": ranking is None,
+        "top1": bool(first and ranked and _norm(ranked[0]) == first),
+        "top3": bool(first and any(_norm(r) == first for r in ranked[:3])),
+        "listed": bool(first and any(_norm(r) == first for r in ranked)),
+        "n_listed": len(ranked),
+    }
+
+
+def _progress_line(i: int, n: int, row: Dict[str, Any]) -> str:
+    ranked = [r["skill"] for r in (row["jev_ranking"] or [])]
+    first = row["agent_loaded"][:1]
+    mark = "ERR" if row["error"] else ("=" if row["top1"] else ("~" if row["listed"] else "x" if first else "."))
+    return f"  [{i:>3}/{n}] {mark}  jev={ranked[:3]}  agent={row['agent_loaded'][:2]}  | {row['request'][:70]!r}"
+
+
+def replay_skills(harness: Harness, turns: List[Turn], *, use_context: bool = True, retry_passes: int = 1,
+                  cooldown_s: float = 60.0, sleep=time.sleep, progress=print) -> Dict[str, Any]:
+    """Run skill selection over every turn, then retry the ones that failed.
+
+    Gateway outages (bursts of 503s) can outlast the client's per-call retries;
+    a later pass after a cooldown recovers most of them, so a bad minute on the
+    provider's side does not leave holes in the measurement.
+    """
     rows: List[Dict[str, Any]] = []
     for i, t in enumerate(turns, 1):
-        ranking = harness.rank_skills(f"replay:{t.session_id}", t.request)
-        shown = _redact(t.request)  # progress lines, reports and exports never carry raw secrets
-        ranked = [r["skill"] for r in (ranking or [])]
-        loaded = [s for s in dict.fromkeys(t.loaded_skills)]
-        first = _norm(loaded[0]) if loaded else None
-        rows.append({
-            "session_id": t.session_id,
-            "message_id": t.message_id,
-            "request": shown[:500],
-            "agent_loaded": loaded,
-            "jev_ranking": ranking,
-            "error": ranking is None,
-            "top1": bool(first and ranked and _norm(ranked[0]) == first),
-            "top3": bool(first and any(_norm(r) == first for r in ranked[:3])),
-        })
+        rows.append(_skill_row(harness, t, use_context))
         if progress:
-            mark = "ERR" if ranking is None else ("=" if rows[-1]["top1"] else ("~" if rows[-1]["top3"] else "x" if first else "."))
-            progress(f"  [{i:>3}/{len(turns)}] {mark}  jev={ranked[:3]}  agent={loaded[:2]}  | {shown[:70]!r}")
+            progress(_progress_line(i, len(turns), rows[-1]))
+    for p in range(retry_passes):
+        failed = [i for i, r in enumerate(rows) if r["error"]]
+        if not failed:
+            break
+        if progress:
+            progress(f"  retry pass {p + 1}: {len(failed)} failed turn(s) after a {cooldown_s:.0f}s cooldown")
+        sleep(cooldown_s)
+        for i in failed:
+            rows[i] = _skill_row(harness, turns[i], use_context)
+            if progress:
+                progress(_progress_line(i + 1, len(turns), rows[i]))
     return summarize_skills(rows)
 
 
@@ -160,6 +197,8 @@ def summarize_skills(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
         "agent_loaded_a_skill": len(with_skill),
         "top1_agreement_pct": pct(sum(r["top1"] for r in with_skill), len(with_skill)),
         "top3_agreement_pct": pct(sum(r["top3"] for r in with_skill), len(with_skill)),
+        "in_list_pct": pct(sum(r.get("listed", r["top3"]) for r in with_skill), len(with_skill)),
+        "avg_listed": round(sum(r.get("n_listed", 0) for r in ok) / len(ok), 2) if ok else None,
         "jev_said_none_when_agent_loaded_nothing_pct": pct(sum(not r["jev_ranking"] for r in without), len(without)),
         "jev_ranked_when_agent_loaded_nothing": sum(bool(r["jev_ranking"]) for r in without),
         "rows": rows,
@@ -207,7 +246,7 @@ def _batch_mode(h: Harness, *, interval_s: float) -> None:
 
 def run(db: Optional[Path] = None, *, limit: int = 50, points: str = "skills", since_days: Optional[float] = None,
         only_with_skill: bool = False, export: Optional[Path] = None, harness: Optional[Harness] = None,
-        interval_s: float = 2.1, progress=print) -> Dict[str, Any]:
+        interval_s: float = 2.1, use_context: bool = True, progress=print) -> Dict[str, Any]:
     db = Path(db) if db else default_db()
     if not db.exists():
         raise FileNotFoundError(f"no Hermes session database at {db}")
@@ -221,7 +260,7 @@ def run(db: Optional[Path] = None, *, limit: int = 50, points: str = "skills", s
     report: Dict[str, Any] = {"db": str(db), "turns": len(turns)}
     if points in ("skills", "all"):
         progress(f"skill ranking over {len(h.roster())} skills:")
-        report["skills"] = replay_skills(h, turns, progress=progress)
+        report["skills"] = replay_skills(h, turns, use_context=use_context, progress=progress)
     if points in ("risk", "all"):
         report["risk"] = replay_risk(h, turns, progress=progress)
     if export:
@@ -244,7 +283,8 @@ def print_summary(report: Dict[str, Any], out=print) -> None:
         out(f"  turns replayed                         {s['turns']}  (errors: {s['errors']})")
         out(f"  turns where the agent loaded a skill   {s['agent_loaded_a_skill']}")
         out(f"  Jev #1 == agent's skill                {s['top1_agreement_pct']}%")
-        out(f"  agent's skill in Jev top 3             {s['top3_agreement_pct']}%")
+        out(f"  agent's skill anywhere in Jev's list   {s['in_list_pct']}%")
+        out(f"  skills listed per turn (avg)           {s['avg_listed']}")
         out(f"  agent loaded nothing, Jev said none    {s['jev_said_none_when_agent_loaded_nothing_pct']}%")
         out("  note: the agent's own choice is a weak label; review disagreements before tuning.")
     r = report.get("risk")

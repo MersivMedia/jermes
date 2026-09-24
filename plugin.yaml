@@ -1,9 +1,22 @@
 name: jermes
-version: "0.1.0"
-description: "Jev decision layer for Hermes Agent. Moves bounded agent decisions (tool risk, result relevance, skill choice, loop detection, model routing) out of the reasoning model into code that consults TypeSafe's Jev via Vercel AI Gateway or TypeSafe directly. Ships in shadow mode: logs what it would do and changes nothing until promoted."
+version: "0.2.0"
+description: "Jev decision layer for Hermes Agent. Moves bounded agent decisions (skill selection, tool risk, result relevance, loop detection, model routing) out of the reasoning model into code that consults TypeSafe's Jev via Vercel AI Gateway, OpenRouter, or TypeSafe directly. Ships in shadow mode: logs what it would do and changes nothing until promoted."
 author: "Mersiv Media"
-requires_env:
-  - AI_GATEWAY_API_KEY
+# One of these is needed; whichever is set picks the backend (see README).
+# Not requires_env: that would prompt every user for all three.
+optional_env:
+  - name: AI_GATEWAY_API_KEY
+    description: "Vercel AI Gateway key (backend: vercel)"
+    url: "https://vercel.com/docs/ai-gateway"
+    secret: true
+  - name: OPENROUTER_API_KEY
+    description: "OpenRouter key (backend: openrouter)"
+    url: "https://openrouter.ai/settings/keys"
+    secret: true
+  - name: TYPESAFE_API_KEY
+    description: "TypeSafe key (backend: typesafe)"
+    url: "https://docs.typesafe.ai"
+    secret: true
 hooks:
   - pre_llm_call
   - pre_tool_call

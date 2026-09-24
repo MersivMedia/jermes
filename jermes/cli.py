@@ -28,11 +28,30 @@ def _client(cfg) -> JevClient:
                                   deadline_s=max(5.0, float(b.get("deadline_s", 2.5)))))
 
 
+def _auto_backend() -> bool:
+    import os
+
+    import yaml
+
+    if os.environ.get("JERMES_BACKEND"):
+        return False
+    try:
+        raw = yaml.safe_load(config_path().read_text(encoding="utf-8")) if config_path().exists() else {}
+        name = ((raw or {}).get("backend") or {}).get("name")
+    except Exception:
+        name = None
+    return not name or str(name).lower() == "auto"
+
+
 def cmd_status(_args) -> int:
     cfg = load_config()
     client = _client(cfg)
     r = client.config.resolved()
-    print(f"backend       {cfg['backend']['name']}  ({r['base_url']})")
+    from .config import AUTO_ORDER
+
+    how = "auto-detected from " + next((env for n, env in AUTO_ORDER if n == cfg["backend"]["name"]), "?") \
+        if _auto_backend() else "set in config"
+    print(f"backend       {cfg['backend']['name']}  ({r['base_url']})  [{how}]")
     print(f"model         {r['model']}")
     print(f"api key       {r['api_key_env']} {'set' if r['api_key'] else 'MISSING'}")
     print(f"config        {config_path()}{'' if config_path().exists() else '  (defaults)'}")
@@ -112,7 +131,8 @@ def cmd_replay(args) -> int:
 
     try:
         report = replay.run(args.db, limit=args.limit, points=args.points, since_days=args.days,
-                            only_with_skill=args.with_skill, export=args.export, interval_s=args.interval)
+                            only_with_skill=args.with_skill, export=args.export, interval_s=args.interval,
+                            use_context=not args.no_context)
     except (FileNotFoundError, RuntimeError) as exc:
         print(f"FAILED: {exc}")
         return 1
@@ -144,6 +164,7 @@ class register_cli:  # namespace used by the plugin entry point
         p.add_argument("--export", default=None, help="write disagreements to JSONL for labelling")
         p.add_argument("--json", default=None, help="write the full report as JSON")
         p.add_argument("--interval", type=float, default=2.1, help="seconds between Jev requests (gateway allows ~30/min)")
+        p.add_argument("--no-context", action="store_true", help="send only the request, no earlier conversation")
 
     @staticmethod
     def handle(args: Any) -> int:

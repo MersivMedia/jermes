@@ -26,7 +26,7 @@ POLICY_VERSION = "2026-09-24.1"
 
 DEFAULTS: Dict[str, Any] = {
     "backend": {
-        "name": "vercel",
+        "name": "auto",  # auto | vercel | openrouter | typesafe
         "base_url": None,
         "model": None,
         "deadline_s": 2.5,
@@ -35,14 +35,15 @@ DEFAULTS: Dict[str, Any] = {
     },
     "redact": True,
     "points": {
-        # D1 - skill ranking (pre_llm_call)
+        # D1 - skill selection (pre_llm_call)
         "skill_suggest": {
             "mode": "shadow",
-            "gate_threshold": 0.30,
-            "fits_threshold": 0.30,
-            "shortlist": 5,       # candidates carried from the skim into the rerank
-            "max_ranked": 3,      # skills shown to the agent, most relevant first
+            "fits_threshold": 0.50,   # supporting skills must clear their own "would this help" check
+            "shortlist": 5,           # candidates carried from the skim into the select call
+            "max_listed": 4,          # skills shown to the agent (primary + supporting)
             "excerpt_chars": 700,
+            "context_messages": 4,    # earlier user/assistant turns Jev sees (0 = request only)
+            "context_chars": 400,     # per message
         },
         # D3 + D4 - argument check and risk gate (pre_tool_call)
         "risk_gate": {
@@ -96,6 +97,20 @@ def _deep_merge(base: Dict[str, Any], over: Mapping[str, Any]) -> Dict[str, Any]
     return out
 
 
+# Which key selects which backend when backend.name is "auto". Vercel first
+# (the key exists only for gateway use), then TypeSafe direct, then OpenRouter
+# last: many Hermes users already have OPENROUTER_API_KEY for their main model,
+# and an explicit Jev-specific key should win over it.
+AUTO_ORDER = (("vercel", "AI_GATEWAY_API_KEY"), ("typesafe", "TYPESAFE_API_KEY"), ("openrouter", "OPENROUTER_API_KEY"))
+
+
+def detect_backend() -> str:
+    for name, env in AUTO_ORDER:
+        if os.environ.get(env, "").strip():
+            return name
+    return "vercel"  # nothing set: report the Vercel key as missing
+
+
 def config_path() -> Path:
     return Path(os.environ.get("JERMES_CONFIG") or data_dir() / "config.yaml")
 
@@ -122,6 +137,8 @@ def load_config(overrides: Mapping[str, Any] | None = None) -> Dict[str, Any]:
     backend = os.environ.get("JERMES_BACKEND", "").strip().lower()
     if backend:
         cfg["backend"]["name"] = backend
+    if str(cfg["backend"].get("name") or "auto").lower() == "auto":
+        cfg["backend"]["name"] = detect_backend()
 
     for name, point in cfg["points"].items():
         mode = point.get("mode")

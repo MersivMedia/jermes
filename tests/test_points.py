@@ -75,39 +75,80 @@ def test_result_filter_chunking_caps():
     assert 3 <= len(result_filter.chunk(one_block, 50)) <= 51
 
 
-def test_skill_suggest_chunking_and_gate():
+NONE = skill_suggest.NONE_OPTION
+
+
+def test_skim_chunks_each_carry_the_none_option():
     roster = [skill_suggest.Skill(f"s{i}", f"desc {i}") for i in range(300)]
     sets = skill_suggest.skim_questions(roster)
     assert len(sets) == 2
-    assert len(sets[0]["which"].criteria) == 255 and "gate::prose_suffices" in sets[0]
-    assert "gate::prose_suffices" not in sets[1]
-    g = skill_suggest.gate_value({
-        "gate::acts_on_user_system": NoulAnswer(1.0),
-        "gate::would_follow_documented_procedure": NoulAnswer(1.0),
-        "gate::prose_suffices": NoulAnswer(1.0),
-    })
-    assert abs(g - 2 / 3) < 1e-9
+    assert all(NONE in qs["which"].criteria for qs in sets)
+    assert all(len(qs["which"].criteria) <= 255 for qs in sets)
+    names = [n for qs in sets for n in qs["which"].criteria if n != NONE]
+    assert sorted(names) == sorted(s.name for s in roster)  # every skill appears exactly once
 
 
-def test_skill_suggest_rerank_policy():
-    pol = skill_suggest.make_rerank_policy(0.3, ["a", "b", "c"], max_ranked=3)
-    which = ChoiceAnswer("b", {"a": 0.2, "b": 0.7, "c": 0.1}, 0.4)
-    low = {"fits::a": NoulAnswer(0.1), "fits::b": NoulAnswer(0.2), "fits::c": NoulAnswer(0.05)}
-    assert pol({"which": which, **low}).action == "none"
-    # Ranked by the Choice probability; skills whose own "fits" Noul fails are dropped.
-    v = pol({"which": which, "fits::a": NoulAnswer(0.9), "fits::b": NoulAnswer(0.6), "fits::c": NoulAnswer(0.1)})
-    assert v.action == "ranked" and [r["skill"] for r in v.detail["ranking"]] == ["b", "a"]
-    assert v.detail["skill"] == "b" and len(v.detail["candidates"]) == 3
-    capped = skill_suggest.make_rerank_policy(0.3, ["a", "b", "c"], max_ranked=1)
-    allfit = {k: NoulAnswer(0.9) for k in low}
-    assert [r["skill"] for r in capped({"which": which, **allfit}).detail["ranking"]] == ["b"]
+def test_skim_verdict_none_needs_every_chunk():
+    none_chunk = {"which": ChoiceAnswer(NONE, {NONE: 0.9, "a": 0.1}, 0.8)}
+    skill_chunk = {"which": ChoiceAnswer("b", {NONE: 0.2, "b": 0.8}, 0.6)}
+    assert skill_suggest.skim_verdict([none_chunk], 5)[0] is True
+    wins, shortlist, p_none = skill_suggest.skim_verdict([none_chunk, skill_chunk], 5)
+    assert wins is False and "b" in [n for n, _ in shortlist] and NONE not in [n for n, _ in shortlist]
+    assert p_none == 0.9
+
+
+def test_select_policy_lists_primary_then_supporting():
+    names = ["research-design-documents", "grounded-citations", "apple-notes"]
+    pol = skill_suggest.make_select_policy(0.5, names, max_listed=4)
+    which = ChoiceAnswer("research-design-documents",
+                         {"research-design-documents": 0.6, "grounded-citations": 0.3, "apple-notes": 0.05, NONE: 0.05}, 0.5)
+    fits = {"fits::research-design-documents": NoulAnswer(0.8), "fits::grounded-citations": NoulAnswer(0.9),
+            "fits::apple-notes": NoulAnswer(0.1)}
+    v = pol({"which": which, **fits})
+    # The Choice winner leads even though a supporting skill has a higher fit score.
+    assert v.action == "ranked"
+    assert [r["skill"] for r in v.detail["ranking"]] == ["research-design-documents", "grounded-citations"]
+
+
+def test_select_policy_none_option_and_failed_fits():
+    names = ["a", "b"]
+    pol = skill_suggest.make_select_policy(0.5, names)
+    chose_none = ChoiceAnswer(NONE, {NONE: 0.7, "a": 0.2, "b": 0.1}, 0.5)
+    v = pol({"which": chose_none, "fits::a": NoulAnswer(0.9), "fits::b": NoulAnswer(0.9)})
+    assert v.action == "none" and v.detail["ranking"] == []
+    low = pol({"which": ChoiceAnswer("a", {"a": 0.8, "b": 0.2}, 0.6),
+               "fits::a": NoulAnswer(0.2), "fits::b": NoulAnswer(0.1)})
+    assert low.action == "none"
+    capped = skill_suggest.make_select_policy(0.5, ["a", "b", "c"], max_listed=1)
+    allfit = {f"fits::{n}": NoulAnswer(0.9) for n in "abc"}
+    assert [r["skill"] for r in capped({"which": ChoiceAnswer("c", {"c": 0.9}, 0.9), **allfit}).detail["ranking"]] == ["c"]
+
+
+def test_context_window_formatting():
+    history = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "run the SCAIL test with the dancer clip"},
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "x"}]},
+        {"role": "tool", "content": "huge tool output " * 500},
+        {"role": "user", "content": "[System note: Your previous turn was interrupted]"},
+        {"role": "assistant", "content": "Done. The invert test is queued next. " + "x" * 900},
+        {"role": "user", "content": "yes do the invert test next"},
+    ]
+    prior = skill_suggest.history_before_request(history, "yes do the invert test next")
+    ctx = skill_suggest.format_context(prior, max_messages=4, chars_each=100)
+    lines = ctx.splitlines()
+    assert lines[0].startswith("user: run the SCAIL test") and lines[-1].startswith("assistant: Done.")
+    assert "tool output" not in ctx and "System note" not in ctx and "invert test next" not in lines[0]
+    assert all(len(line) <= 112 for line in lines)
+    assert skill_suggest.format_context(prior, max_messages=0) == ""
+    assert "recent_context" not in skill_suggest.state_for("hi", "")
 
 
 def test_ranking_block_wording():
-    block = skill_suggest.ranking_block([{"skill": "pptx-author"}, {"skill": "powerpoint"}])
-    assert "1. pptx-author" in block and "2. powerpoint" in block and "Ignore this list" in block
-    assert "No skill" in skill_suggest.ranking_block([])
-    assert "pptx" in skill_suggest.suggestion_block("pptx")
+    block = skill_suggest.ranking_block([{"skill": "research-design-documents"}, {"skill": "grounded-citations"}])
+    assert "1. research-design-documents" in block and "2. grounded-citations" in block and "supporting" in block
+    assert "Relevant skill for this request: pptx" in skill_suggest.suggestion_block("pptx")
+    assert "No skill is needed" in skill_suggest.ranking_block([])
 
 
 def test_loop_guard_policy_and_note():

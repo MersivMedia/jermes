@@ -133,3 +133,17 @@ def test_429_without_time_reports_rate_limited(fake):
     with pytest.raises(JevError) as ei:
         c.ask({"t": "x"}, {"q": Noul(instructions="y?")})
     assert ei.value.kind == "rate_limited"
+
+
+def test_openrouter_backend_wire_format(fake, monkeypatch):
+    # Shape from https://openrouter.ai/docs/guides/community/typesafe-sdk:
+    # POST https://openrouter.ai/api/v1/systemone, model typesafe/jev-1.13, OpenRouter key as Bearer.
+    monkeypatch.setenv("OPENROUTER_API_KEY", "or-key")
+    c = JevClient(ClientConfig(backend="openrouter", zero_data_retention=True),
+                  transport=httpx.MockTransport(fake.handler), sleep=lambda s: None)
+    c.ask({"m": "hi"}, {"u": Noul("Is it urgent?")})
+    req = fake.requests[0]
+    assert req["url"] == "https://openrouter.ai/api/v1/systemone"
+    assert req["headers"]["authorization"] == "Bearer or-key"
+    assert req["body"]["model"] == "typesafe/jev-1.13"
+    assert "providerOptions" not in req["body"]  # Vercel-only field
