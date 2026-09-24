@@ -1,0 +1,10 @@
+name: jermes
+version: "0.1.0"
+description: "Jev deterministic decision layer for Hermes Agent. Moves bounded agent decisions (tool risk, result relevance, skill choice, loop detection, model routing) out of the reasoning model into code that consults TypeSafe's Jev via Vercel AI Gateway or TypeSafe directly. Ships in shadow mode: logs what it would do and changes nothing until promoted."
+author: "Mersiv Media"
+requires_env:
+  - AI_GATEWAY_API_KEY
+hooks:
+  - pre_llm_call
+  - pre_tool_call
+  - transform_tool_result

@@ -1,0 +1,131 @@
+"""Jermes configuration.
+
+Read from ``$HERMES_HOME/jermes/config.yaml`` and deep-merged over DEFAULTS.
+Every decision point starts in ``shadow`` mode (PRD Phase 0): Jev is consulted
+and every would-be action is logged, but nothing about Hermes' behaviour
+changes until a point is promoted to ``advise`` or ``enforce``.
+
+Environment overrides:
+  JERMES_MODE=off|shadow|advise|enforce   force every point to one mode
+                                          (``off`` is the global kill switch)
+  JERMES_BACKEND=vercel|typesafe
+  JERMES_CONFIG=/path/to/config.yaml
+"""
+
+from __future__ import annotations
+
+import copy
+import os
+from pathlib import Path
+from typing import Any, Dict, Mapping
+
+from .store import data_dir
+
+MODES = ("off", "shadow", "advise", "enforce")
+POLICY_VERSION = "2026-09-24.1"
+
+DEFAULTS: Dict[str, Any] = {
+    "backend": {
+        "name": "vercel",
+        "base_url": None,
+        "model": None,
+        "deadline_s": 2.5,
+        "max_retries": 1,
+        "zero_data_retention": False,
+    },
+    "redact": True,
+    "points": {
+        # D1 - skill suggestion (pre_llm_call)
+        "skill_suggest": {
+            "mode": "shadow",
+            "gate_threshold": 0.30,
+            "fits_threshold": 0.30,
+            "shortlist": 3,
+            "excerpt_chars": 700,
+        },
+        # D3 + D4 - argument check and risk gate (pre_tool_call)
+        "risk_gate": {
+            "mode": "shadow",
+            "gated_tools": [
+                "terminal", "execute_code", "write_file", "patch", "send_message",
+                "cronjob", "browser_click", "browser_type", "skill_manage", "delegate_task",
+            ],
+            "block_threshold": 0.85,
+            "review_threshold": 0.50,
+            "review_risk_score": 2.5,
+            "mismatch_threshold": 0.20,
+            "max_arg_chars": 4000,
+        },
+        # D5 - tool-result relevance filter (transform_tool_result)
+        "result_filter": {
+            "mode": "shadow",
+            "tools": ["web_extract", "read_file", "terminal", "session_search", "browser_snapshot"],
+            "min_chars": 6000,
+            "max_chars": 100000,
+            "max_chunks": 120,
+            "keep_threshold": 0.35,
+            "max_kept_fraction": 0.85,
+        },
+        # D6 - loop and completion notes (transform_tool_result)
+        "loop_guard": {
+            "mode": "shadow",
+            "window": 8,
+            "completion_every": 3,
+            "completion_threshold": 0.85,
+        },
+        # D7 - per-turn model routing (llm_request middleware)
+        "model_router": {
+            "mode": "shadow",
+            "cheap_model": None,
+            "max_difficulty": 0.6,
+            "min_confidence": 0.7,
+            "max_stakes": 0.3,
+        },
+    },
+}
+
+
+def _deep_merge(base: Dict[str, Any], over: Mapping[str, Any]) -> Dict[str, Any]:
+    out = copy.deepcopy(base)
+    for key, value in (over or {}).items():
+        if isinstance(value, Mapping) and isinstance(out.get(key), dict):
+            out[key] = _deep_merge(out[key], value)
+        else:
+            out[key] = copy.deepcopy(value)
+    return out
+
+
+def config_path() -> Path:
+    return Path(os.environ.get("JERMES_CONFIG") or data_dir() / "config.yaml")
+
+
+def load_config(overrides: Mapping[str, Any] | None = None) -> Dict[str, Any]:
+    cfg = copy.deepcopy(DEFAULTS)
+    path = config_path()
+    if path.exists():
+        import yaml
+
+        try:
+            loaded = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except yaml.YAMLError:
+            loaded = {}
+        if isinstance(loaded, Mapping):
+            cfg = _deep_merge(cfg, loaded)
+    if overrides:
+        cfg = _deep_merge(cfg, overrides)
+
+    forced = os.environ.get("JERMES_MODE", "").strip().lower()
+    if forced in MODES:
+        for point in cfg["points"].values():
+            point["mode"] = forced
+    backend = os.environ.get("JERMES_BACKEND", "").strip().lower()
+    if backend:
+        cfg["backend"]["name"] = backend
+
+    for name, point in cfg["points"].items():
+        mode = point.get("mode")
+        if mode is False:  # YAML 1.1 parses a bare `off` as boolean False
+            mode = "off"
+        mode = str(mode).strip().lower() if mode is not None else "shadow"
+        point["mode"] = mode if mode in MODES else "shadow"
+    return cfg

@@ -1,0 +1,29 @@
+[project]
+name = "jermes"
+version = "0.1.0"
+description = "Jev deterministic decision layer for Hermes Agent"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "httpx>=0.28.1,<1",
+  "pyyaml>=6.0.2,<7",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3,<10"]
+
+[project.scripts]
+jermes = "jermes.cli:main"
+
+[build-system]
+requires = ["setuptools>=75,<90"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["jermes", "jermes.points"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q"

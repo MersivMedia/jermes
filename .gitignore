@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+.env
+.env.*
+.vercel/
