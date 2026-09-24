@@ -1,7 +1,7 @@
 [project]
 name = "jermes"
 version = "0.1.0"
-description = "Jev deterministic decision layer for Hermes Agent"
+description = "Jev decision layer for Hermes Agent"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.11,<3.14"

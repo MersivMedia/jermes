@@ -1,6 +1,4 @@
-# Jermes
-
-**Jev Deterministic Decision Layer for Hermes Agent.**
+# Jermes - Jev decision layer for Hermes Agent
 
 Jermes is a [Hermes Agent](https://github.com/NousResearch/hermes-agent) plugin that takes the small, bounded decisions an agent makes all the time out of the expensive reasoning model:
 
