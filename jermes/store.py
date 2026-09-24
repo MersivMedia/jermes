@@ -137,6 +137,9 @@ class Store:
             "input_tokens", "error", "detail_json",
         ]
         values = [row.get(c) for c in cols]
+        for i, c in enumerate(cols):
+            if c in ("applied", "cached") and values[i] is None:
+                values[i] = 0
         with self._lock:
             cur = self._conn.execute(
                 f"INSERT INTO decisions(ts, {', '.join(cols)}) VALUES (?, {', '.join('?' * len(cols))})",

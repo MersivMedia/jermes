@@ -1,6 +1,6 @@
-"""D1: skill suggestion (PRD section 5.1).
+"""D1: skill ranking (PRD section 5.1).
 
-Port of TypeSafe's two-call skill-suggestion cookbook, which measured wrong
+Built on TypeSafe's two-call skill-suggestion cookbook, which measured wrong
 skill loads falling 16.8% -> 7.3% on the Hermes roster:
 
   call 1 (skim):   Choice over every skill (name -> index description) plus
@@ -8,8 +8,10 @@ skill loads falling 16.8% -> 7.3% on the Hermes roster:
   call 2 (rerank): Choice over the top N with full description + SKILL.md
                    excerpt, plus one "does this skill fit" Noul per candidate.
 
-The result is one short block injected into the *user message* via
-``pre_llm_call`` (Hermes' cache-safe injection point), never the system prompt.
+Unlike the cookbook (one suggestion), Jermes returns a *ranking*: candidates
+that pass the "fits" gate, ordered by the rerank Choice probability. The block
+is injected into the *user message* via ``pre_llm_call`` (Hermes' cache-safe
+injection point), never the system prompt.
 """
 
 from __future__ import annotations
@@ -21,7 +23,8 @@ from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 from ..engine import Verdict
 from ..questions import MAX_CHOICE_OPTIONS, Choice, Noul
 
-SPEC_VERSION = "skill_suggest.1"
+SPEC_VERSION = "skill_suggest.2"
+SKIM_DESC_CHARS = 200  # keep call 1 well inside Jev's 32k state+question budget
 
 GATE_QUESTIONS = {
     "acts_on_user_system": (
@@ -95,7 +98,7 @@ def skim_questions(roster: Sequence[Skill]) -> List[Dict[str, Any]]:
         qs: Dict[str, Any] = {
             "which": Choice(
                 instructions="Which of these skills, if any, is the right one to load to help with the user's latest `request`?",
-                criteria={s.name: (s.description or None) for s in chunk},
+                criteria={s.name: ((s.description or "")[:SKIM_DESC_CHARS] or None) for s in chunk},
             )
         }
         if start == 0:
@@ -135,25 +138,53 @@ def rerank_questions(names: Sequence[str], by_name: Mapping[str, Skill], excerpt
     return qs
 
 
-def make_rerank_policy(fits_threshold: float, names: Sequence[str]):
+def make_rerank_policy(fits_threshold: float, names: Sequence[str], max_ranked: int = 3):
+    """Rank = rerank Choice probability, filtered by each skill's own "fits" Noul.
+
+    The Choice is relative (which one), the Nouls are absolute (does it fit at
+    all), so all candidates can fail and the ranking can come back empty.
+    """
+
     def policy(a: Dict[str, Any]) -> Verdict:
+        probs = a["which"].probabilities
         fits = {n: a[f"fits::{n}"].noul for n in names}
-        best = max(fits.values()) if fits else 0.0
-        detail = {"fits": {k: round(v, 3) for k, v in fits.items()}, "winner": a["which"].choice}
-        if best < fits_threshold:
+        ordered = sorted(names, key=lambda n: -probs.get(n, 0.0))
+        ranking = [
+            {"skill": n, "p": round(probs.get(n, 0.0), 3), "fits": round(fits[n], 3)}
+            for n in ordered
+            if fits[n] >= fits_threshold
+        ][:max_ranked]
+        detail = {
+            "candidates": [{"skill": n, "p": round(probs.get(n, 0.0), 3), "fits": round(fits[n], 3)} for n in ordered],
+            "ranking": ranking,
+        }
+        if not ranking:
             return Verdict("none", {**detail, "reason": "no candidate fits"})
-        return Verdict("suggest", {**detail, "skill": a["which"].choice})
+        return Verdict("ranked", {**detail, "skill": ranking[0]["skill"]})
 
     return policy
 
 
-def suggestion_block(skill: Optional[str]) -> str:
-    body = (
-        f"Relevant to the current request: {skill}. Ignore this if it does not fit what the user actually asked for."
-        if skill
-        else "No skill in the roster appears relevant to this request."
-    )
+def ranking_block(ranking: Sequence[Mapping[str, Any]]) -> str:
+    """What the agent sees. Wording follows the cookbook's findings: always say
+    something (an explicit "nothing applies" counters the index's own push to
+    load a skill), and say it can be ignored (a forceful wrong suggestion does
+    more damage than none)."""
+    if not ranking:
+        body = "No skill in the roster appears relevant to this request."
+    else:
+        lines = [f"{i}. {r['skill']}" for i, r in enumerate(ranking, 1)]
+        body = (
+            "Skills ranked by relevance to the current request (most relevant first):\n"
+            + "\n".join(lines)
+            + "\nLoad the first one that fits. Ignore this list if none match what the user actually asked for."
+        )
     return f"<skill_relevance>\n{body}\n</skill_relevance>"
+
+
+def suggestion_block(skill: Optional[str]) -> str:
+    """Back-compat: a one-item ranking."""
+    return ranking_block([{"skill": skill}] if skill else [])
 
 
 def merge_rankings(chunk_answers: Sequence[Mapping[str, Any]], k: int) -> List[Tuple[str, float]]:

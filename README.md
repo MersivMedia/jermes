@@ -25,7 +25,7 @@ Jermes uses only public Hermes plugin surfaces. It needs no core patches and nev
 | `risk_gate` | D3, D4 | `pre_tool_call` hook | Blocks clearly dangerous, unrequested calls. Sends uncertain ones to Hermes' approval gate. |
 | `result_filter` | D5 | `transform_tool_result` hook | Drops irrelevant sections of big tool results before the model re-reads them every turn. |
 | `loop_guard` | D6 | `transform_tool_result` hook | Adds a one-line note when a failed call is repeated or the task already looks done. |
-| `skill_suggest` | D1 | `pre_llm_call` hook | Two-stage skill ranking. Adds one suggestion line to the user message. |
+| `skill_suggest` | D1 | `pre_llm_call` hook | Two-stage Jev ranking of every skill against the request. Adds the top 3 (most relevant first) to the user message, or says no skill applies. |
 | `model_router` | D7 | `llm_request` middleware | Sends confidently easy, low-stakes turns to a cheaper model, sticky for the whole turn. |
 
 Guarantees built into the code:
@@ -58,10 +58,35 @@ Verify access:
 
 ```bash
 hermes jermes check     # one live Jev call with a harmless sample
+hermes jermes rank "make me a pitch deck as a pptx"   # see Jev's skill ranking for one request
+hermes jermes replay    # shadow-test over your real past sessions (see below)
 hermes jermes status    # backend, key, per-point modes
 hermes jermes stats     # decisions, cache hits, latency, tokens per point
 hermes jermes recent    # last decisions
 ```
+
+## Test in shadow mode quickly
+
+You don't need to wait for new sessions. `replay` reads your real past user turns from Hermes' `state.db` (opened read-only) and runs the decision points over them offline, without touching a live agent:
+
+```bash
+hermes jermes replay -n 50                      # skill ranking over your last 50 real requests
+hermes jermes replay --with-skill -n 40         # only turns where the agent actually loaded a skill
+hermes jermes replay --points all -n 30         # skills + risk gate over the tool calls that really ran
+hermes jermes replay -n 50 --export review.jsonl   # disagreements, ready for labelling
+```
+
+For skill ranking, the report compares Jev's ranking with the skill the agent actually loaded in that turn:
+
+- top-1 agreement
+- top-3 agreement
+- how often Jev says "no skill" when the agent loaded none
+
+What the agent loaded is a weak label: the agent itself picks the wrong skill part of the time. Treat disagreements as things to review, not as Jev errors.
+
+Each `replay -n 50` makes about 100 Jev calls (a skim of about 7.5k tokens plus a rerank of about 2k per turn, with your 206-skill roster), roughly 0.5M tokens or about $0.02. Repeat runs are free because every decision is cached.
+
+For live shadow mode, enable the plugin and use Hermes normally. Every point logs what it would have done, and `hermes jermes stats` / `recent` show the results.
 
 ## Configure
 
@@ -89,7 +114,7 @@ Modes: `off` → `shadow` (log only) → `advise` (notes and suggestions) → `e
 
 ```bash
 uv venv && uv pip install -e '.[dev]'
-pytest                                  # 46 offline tests; Jev is faked at the HTTP layer
+pytest                                  # offline tests; Jev is faked at the HTTP layer
 HERMES_AGENT_DIR=~/hermes-agent pytest  # also runs the end-to-end test against a real Hermes checkout
 ```
 

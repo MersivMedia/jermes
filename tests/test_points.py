@@ -90,13 +90,24 @@ def test_skill_suggest_chunking_and_gate():
 
 
 def test_skill_suggest_rerank_policy():
-    pol = skill_suggest.make_rerank_policy(0.3, ["a", "b"])
-    which = ChoiceAnswer("b", {"a": 0.3, "b": 0.7}, 0.4)
-    assert pol({"which": which, "fits::a": NoulAnswer(0.1), "fits::b": NoulAnswer(0.2)}).action == "none"
-    v = pol({"which": which, "fits::a": NoulAnswer(0.9), "fits::b": NoulAnswer(0.2)})
-    assert v.action == "suggest" and v.detail["skill"] == "b"  # Choice picks, Nouls gate
+    pol = skill_suggest.make_rerank_policy(0.3, ["a", "b", "c"], max_ranked=3)
+    which = ChoiceAnswer("b", {"a": 0.2, "b": 0.7, "c": 0.1}, 0.4)
+    low = {"fits::a": NoulAnswer(0.1), "fits::b": NoulAnswer(0.2), "fits::c": NoulAnswer(0.05)}
+    assert pol({"which": which, **low}).action == "none"
+    # Ranked by the Choice probability; skills whose own "fits" Noul fails are dropped.
+    v = pol({"which": which, "fits::a": NoulAnswer(0.9), "fits::b": NoulAnswer(0.6), "fits::c": NoulAnswer(0.1)})
+    assert v.action == "ranked" and [r["skill"] for r in v.detail["ranking"]] == ["b", "a"]
+    assert v.detail["skill"] == "b" and len(v.detail["candidates"]) == 3
+    capped = skill_suggest.make_rerank_policy(0.3, ["a", "b", "c"], max_ranked=1)
+    allfit = {k: NoulAnswer(0.9) for k in low}
+    assert [r["skill"] for r in capped({"which": which, **allfit}).detail["ranking"]] == ["b"]
+
+
+def test_ranking_block_wording():
+    block = skill_suggest.ranking_block([{"skill": "pptx-author"}, {"skill": "powerpoint"}])
+    assert "1. pptx-author" in block and "2. powerpoint" in block and "Ignore this list" in block
+    assert "No skill" in skill_suggest.ranking_block([])
     assert "pptx" in skill_suggest.suggestion_block("pptx")
-    assert "No skill" in skill_suggest.suggestion_block(None)
 
 
 def test_loop_guard_policy_and_note():

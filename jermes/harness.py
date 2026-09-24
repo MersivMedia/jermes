@@ -14,6 +14,7 @@ Every callback here obeys three rules:
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -88,29 +89,40 @@ class Harness:
 
     def _suggest_skill(self, session_id: str, user_message: str) -> Optional[str]:
         point = "skill_suggest"
-        cfg = self.engine.point_config(point)
         if not self.engine.enabled(point) or not user_message.strip():
             return None
-        if self._roster is None:
-            self._roster = skill_suggest.load_roster()
-        roster = self._roster
-        if len(roster) < 2:
-            return None
-        by_name = {s.name: s for s in roster}
-        state = skill_suggest.state_for(user_message)
-        k = int(cfg.get("shortlist", 3))
         if self.engine.mode(point) == "shadow" and self.background_shadow:
             try:
-                self._shadow_pool.submit(self._suggest_skill_sync, session_id, state, roster, by_name, cfg, k)
+                self._shadow_pool.submit(self.rank_skills, session_id, user_message)
             except RuntimeError:
                 pass
             return None
-        return self._suggest_skill_sync(session_id, state, roster, by_name, cfg, k)
+        ranking = self.rank_skills(session_id, user_message)
+        if ranking is None or self.engine.mode(point) not in ("advise", "enforce"):
+            return None
+        return skill_suggest.ranking_block(ranking)
 
-    def _suggest_skill_sync(self, session_id: str, state: Dict[str, Any], roster: list,
-                            by_name: Dict[str, Any], cfg: Dict[str, Any], k: int) -> Optional[str]:
+    def roster(self) -> list:
+        if self._roster is None:
+            self._roster = skill_suggest.load_roster()
+        return self._roster
+
+    def rank_skills(self, session_id: str, user_message: str) -> Optional[list]:
+        """Two-stage Jev ranking of the skill roster for one request.
+
+        Returns a list of ``{"skill", "p", "fits"}`` dicts (most relevant
+        first; empty = "no skill applies"), or ``None`` when Jev could not be
+        consulted. Every step is logged regardless of mode.
+        """
         point = "skill_suggest"
-        # Call 1: skim (one Jev request per 255-skill chunk; gate on the first).
+        cfg = self.engine.point_config(point)
+        roster = self.roster()
+        if len(roster) < 2 or not (user_message or "").strip():
+            return None
+        by_name = {s.name: s for s in roster}
+        state = skill_suggest.state_for(user_message)
+
+        # Call 1: skim every skill (one Jev request per 255-skill chunk).
         chunk_answers = []
         gate = None
         for qs in skill_suggest.skim_questions(roster):
@@ -123,27 +135,31 @@ class Harness:
                 gate = skill_suggest.gate_value(d.answers)
         if gate is None:
             return None
-        advising = self.engine.mode(point) in ("advise", "enforce")
         if gate < float(cfg.get("gate_threshold", 0.3)):
-            # The turn does not want an action taken: say so explicitly, which
-            # counters the skill index's own "err on the side of loading".
-            return skill_suggest.suggestion_block(None) if advising else None
+            # The turn does not want an action taken. An explicit "nothing
+            # applies" counters the skill index's own "err on the side of loading".
+            self.engine.store.log(session_id=session_id, point=point, mode=self.engine.mode(point),
+                                  spec_version=skill_suggest.SPEC_VERSION, action="none",
+                                  detail_json=json.dumps({"reason": "gate", "gate": round(gate, 3)}))
+            return []
 
-        # Call 2: rerank the shortlist with full descriptions.
-        shortlist = [n for n, _ in skill_suggest.merge_rankings(chunk_answers, k)]
+        # Call 2: rerank the shortlist with full descriptions and SKILL.md excerpts.
+        shortlist = [n for n, _ in skill_suggest.merge_rankings(chunk_answers, int(cfg.get("shortlist", 5)))]
         if len(shortlist) < 2:
             return None
         qs = skill_suggest.rerank_questions(shortlist, by_name, int(cfg.get("excerpt_chars", 700)))
         d = self.engine.decide(
             point, state, qs,
-            skill_suggest.make_rerank_policy(float(cfg.get("fits_threshold", 0.3)), shortlist),
+            skill_suggest.make_rerank_policy(float(cfg.get("fits_threshold", 0.3)), shortlist,
+                                             int(cfg.get("max_ranked", 3))),
             session_id=session_id, spec_version=skill_suggest.SPEC_VERSION,
             log_detail={"gate": round(gate, 3), "shortlist": shortlist},
         )
-        if not d.advising:
+        if not d.ok:
             return None
-        self.engine.mark_applied(d)
-        return skill_suggest.suggestion_block(d.detail.get("skill") if d.action == "suggest" else None)
+        if self.engine.mode(point) in ("advise", "enforce"):
+            self.engine.mark_applied(d)
+        return list(d.detail.get("ranking") or [])
 
     # ------------------------------------------------------------------ tools
 

@@ -35,12 +35,13 @@ DEFAULTS: Dict[str, Any] = {
     },
     "redact": True,
     "points": {
-        # D1 - skill suggestion (pre_llm_call)
+        # D1 - skill ranking (pre_llm_call)
         "skill_suggest": {
             "mode": "shadow",
             "gate_threshold": 0.30,
             "fits_threshold": 0.30,
-            "shortlist": 3,
+            "shortlist": 5,       # candidates carried from the skim into the rerank
+            "max_ranked": 3,      # skills shown to the agent, most relevant first
             "excerpt_chars": 700,
         },
         # D3 + D4 - argument check and risk gate (pre_tool_call)

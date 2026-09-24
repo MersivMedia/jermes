@@ -166,10 +166,10 @@ The Hermes tool loop contains seven decision points where a reasoning model curr
 
 | Call | Questions | Decision in code |
 |---|---|---|
-| 1: skim | One Choice over every skill name, with the index description as each option's criteria; three gate Nouls asking whether the turn wants an action taken rather than an explanation | If the mean of the gate Nouls (one inverted) is below 0.30, suggest nothing; otherwise carry the top three into call 2 |
-| 2: rerank | One Choice over the three, now with the full description plus the first 700 characters of each SKILL.md; one "does this skill do the specific thing asked" Noul per candidate | If the best "fits" Noul is below 0.30, suggest nothing; otherwise suggest the Choice winner |
+| 1: skim | One Choice over every skill name, with the index description as each option's criteria; three gate Nouls asking whether the turn wants an action taken rather than an explanation | If the mean of the gate Nouls (one inverted) is below 0.30, report that no skill applies; otherwise carry the top five into call 2 |
+| 2: rerank | One Choice over the shortlist, now with the full description plus the first 700 characters of each SKILL.md; one "does this skill do the specific thing asked" Noul per candidate | Drop candidates whose own "fits" Noul is below 0.30; rank the rest by the Choice probability and keep the top three. An empty ranking means no skill applies |
 
-The result is injected as one short block stating the relevant skill, or stating that no skill appears relevant. TypeSafe found both halves matter: the "ignore this if it does not fit" wording limits damage from wrong suggestions, and an explicit "nothing applies" counteracts the index's own push to load something.[7]
+The result is injected as one short block listing the ranked skills, most relevant first, or stating that no skill appears relevant. TypeSafe found both halves matter: the "ignore this if it does not fit" wording limits damage from wrong suggestions, and an explicit "nothing applies" counteracts the index's own push to load something.[7] Returning a ranking instead of a single suggestion is a deliberate departure from the cookbook, which measured only the single-suggestion form; whether a ranked list helps or hurts wrong-load rates is untested and is measured in Phase 1 by replaying real sessions (`jermes replay`).
 
 **Hermes adaptation.** The cookbook appends the suggestion to the system prompt after the cache breakpoint.[7] Hermes' `pre_llm_call` hook injects into the user message instead, which is the project's sanctioned cache-safe location.[27] Rosters larger than 255 skills are split into chunks, each ranked separately, before the rerank step.[7]
 

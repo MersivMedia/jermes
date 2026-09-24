@@ -1,9 +1,11 @@
 """``hermes jermes <cmd>`` (also runnable as ``python -m jermes``).
 
     status   backend, key presence, per-point modes, data paths
+    check    one live Jev call with a harmless sample, to verify access
+    rank     rank skills for one request:  jermes rank "make me a pitch deck"
+    replay   shadow-replay real past turns from Hermes' state.db (offline)
     stats    decisions per point and mode, cache hits, latency, tokens
     recent   last N logged decisions
-    check    one live Jev call with a harmless sample, to verify access
 """
 
 from __future__ import annotations
@@ -11,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 from typing import Any, List, Optional
 
 from .client import ClientConfig, JevClient, JevError
@@ -81,6 +84,45 @@ def cmd_check(_args) -> int:
     return 0
 
 
+def cmd_rank(args) -> int:
+    from .harness import Harness
+    from .points.skill_suggest import ranking_block
+
+    h = Harness()
+    h.background_shadow = False
+    request = " ".join(args.request)
+    print(f"roster: {len(h.roster())} skills")
+    ranking = h.rank_skills("cli", request)
+    if ranking is None:
+        row = (h.engine.store.recent(1) or [{}])[0]
+        print(f"FAILED: {row.get('error') or 'Jev unavailable (check `jermes check`)'}")
+        return 1
+    for i, r in enumerate(ranking, 1):
+        print(f"  {i}. {r['skill']:<40} p={r['p']:.2f}  fits={r['fits']:.2f}")
+    detail = json.loads((h.engine.store.recent(1, point='skill_suggest') or [{}])[0].get("detail_json") or "{}")
+    rejected = [c for c in detail.get("candidates", []) if c["skill"] not in {r["skill"] for r in ranking}]
+    for c in rejected:
+        print(f"     (rejected) {c['skill']:<29} p={c['p']:.2f}  fits={c['fits']:.2f}")
+    print("\nwhat the agent would see:\n" + ranking_block(ranking))
+    return 0
+
+
+def cmd_replay(args) -> int:
+    from . import replay
+
+    try:
+        report = replay.run(args.db, limit=args.limit, points=args.points, since_days=args.days,
+                            only_with_skill=args.with_skill, export=args.export)
+    except (FileNotFoundError, RuntimeError) as exc:
+        print(f"FAILED: {exc}")
+        return 1
+    replay.print_summary(report)
+    if args.json:
+        Path(args.json).write_text(json.dumps(report, indent=2, default=str), encoding="utf-8")
+        print(f"\nfull report: {args.json}")
+    return 0
+
+
 class register_cli:  # namespace used by the plugin entry point
     @staticmethod
     def setup(parser: argparse.ArgumentParser) -> None:
@@ -91,11 +133,22 @@ class register_cli:  # namespace used by the plugin entry point
         p.add_argument("-n", "--limit", type=int, default=20)
         p.add_argument("--point", default=None)
         sub.add_parser("check", help="make one live Jev call to verify access")
+        p = sub.add_parser("rank", help="rank skills for one request")
+        p.add_argument("request", nargs="+")
+        p = sub.add_parser("replay", help="shadow-replay real past turns from Hermes' state.db")
+        p.add_argument("--db", default=None, help="path to state.db (default: $HERMES_HOME/state.db)")
+        p.add_argument("-n", "--limit", type=int, default=50, help="number of recent real user turns")
+        p.add_argument("--points", choices=["skills", "risk", "all"], default="skills")
+        p.add_argument("--days", type=float, default=None, help="only turns from the last N days")
+        p.add_argument("--with-skill", action="store_true", help="only turns where the agent loaded a skill")
+        p.add_argument("--export", default=None, help="write disagreements to JSONL for labelling")
+        p.add_argument("--json", default=None, help="write the full report as JSON")
 
     @staticmethod
     def handle(args: Any) -> int:
         cmd = getattr(args, "jermes_cmd", None) or "status"
-        return {"status": cmd_status, "stats": cmd_stats, "recent": cmd_recent, "check": cmd_check}[cmd](args)
+        return {"status": cmd_status, "stats": cmd_stats, "recent": cmd_recent, "check": cmd_check,
+                "rank": cmd_rank, "replay": cmd_replay}[cmd](args)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
