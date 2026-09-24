@@ -25,6 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional
 
+from .engine import _redact
 from .harness import Harness
 from .points import risk_gate
 from .store import hermes_home
@@ -67,9 +68,16 @@ def iter_turns(db: Path, *, limit: int = 50, min_chars: int = 15, since_days: Op
             f"SELECT id, session_id, content FROM messages WHERE {where} ORDER BY id DESC", args
         ).fetchall()
         yielded = 0
+        seen: set = set()
         for mid, sid, content in users:
             if _SYNTHETIC.match(content or ""):
                 continue
+            # Compaction and session forks copy earlier user messages into new
+            # sessions; replay each distinct request once (newest copy wins).
+            key = " ".join((content or "").split())[:500]
+            if key in seen:
+                continue
+            seen.add(key)
             # Everything up to the next user message in the same session is this turn.
             nxt = conn.execute(
                 "SELECT MIN(id) FROM messages WHERE session_id=? AND role='user' AND id>?", (sid, mid)
@@ -120,13 +128,14 @@ def replay_skills(harness: Harness, turns: List[Turn], *, progress=print) -> Dic
     rows: List[Dict[str, Any]] = []
     for i, t in enumerate(turns, 1):
         ranking = harness.rank_skills(f"replay:{t.session_id}", t.request)
+        shown = _redact(t.request)  # progress lines, reports and exports never carry raw secrets
         ranked = [r["skill"] for r in (ranking or [])]
         loaded = [s for s in dict.fromkeys(t.loaded_skills)]
         first = _norm(loaded[0]) if loaded else None
         rows.append({
             "session_id": t.session_id,
             "message_id": t.message_id,
-            "request": t.request[:500],
+            "request": shown[:500],
             "agent_loaded": loaded,
             "jev_ranking": ranking,
             "error": ranking is None,
@@ -135,7 +144,7 @@ def replay_skills(harness: Harness, turns: List[Turn], *, progress=print) -> Dic
         })
         if progress:
             mark = "ERR" if ranking is None else ("=" if rows[-1]["top1"] else ("~" if rows[-1]["top3"] else "x" if first else "."))
-            progress(f"  [{i:>3}/{len(turns)}] {mark}  jev={ranked[:3]}  agent={loaded[:2]}  | {t.request[:70]!r}")
+            progress(f"  [{i:>3}/{len(turns)}] {mark}  jev={ranked[:3]}  agent={loaded[:2]}  | {shown[:70]!r}")
     return summarize_skills(rows)
 
 
@@ -178,20 +187,33 @@ def replay_risk(harness: Harness, turns: List[Turn], *, max_calls: int = 200, pr
             counts[action] = counts.get(action, 0) + 1
             if action in ("block", "review"):
                 flagged.append({"action": action, "tool": c["tool"], "reason": d.detail.get("reason"),
-                                "args": state["arguments"][:300], "request": t.request[:200]})
+                                "args": _redact(state["arguments"])[:300], "request": _redact(t.request)[:200]})
     if progress:
         progress(f"  risk_gate over {n} real tool calls: {counts}")
     return {"calls": n, "actions": counts, "flagged": flagged}
 
 
+def _batch_mode(h: Harness, *, interval_s: float) -> None:
+    """Replay is offline: nothing waits on it, so trade the live hook's tight
+    budget (2.5 s, 1 retry, fail open) for patience. Pacing keeps a 50-turn run
+    under the gateway's rate limit instead of burning through retries."""
+    c = h.engine.client.config
+    # Vercel AI Gateway allows 30 requests / 250k tokens per rolling window and
+    # answers overruns with 429 + retry-after (~25 s); leave room to honour it.
+    c.deadline_s = max(c.deadline_s, 90.0)
+    c.max_retries = max(c.max_retries, 6)
+    c.min_interval_s = max(c.min_interval_s, interval_s)
+
+
 def run(db: Optional[Path] = None, *, limit: int = 50, points: str = "skills", since_days: Optional[float] = None,
         only_with_skill: bool = False, export: Optional[Path] = None, harness: Optional[Harness] = None,
-        progress=print) -> Dict[str, Any]:
+        interval_s: float = 2.1, progress=print) -> Dict[str, Any]:
     db = Path(db) if db else default_db()
     if not db.exists():
         raise FileNotFoundError(f"no Hermes session database at {db}")
     h = harness or Harness()
     h.background_shadow = False
+    _batch_mode(h, interval_s=interval_s)
     if not h.engine.client.available():
         raise RuntimeError(f"{h.engine.client.config.resolved()['api_key_env']} is not set")
     turns = list(iter_turns(db, limit=limit, since_days=since_days, only_with_skill=only_with_skill))

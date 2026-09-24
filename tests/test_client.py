@@ -114,3 +114,22 @@ def test_timeout_is_error():
     with pytest.raises(JevError) as e:
         _client(handler).ask("s", {"u": Noul("q")})
     assert e.value.kind == "timeout"
+
+
+def test_pacing_spaces_requests(fake):
+    import time as _t
+
+    c = JevClient(ClientConfig(api_key="k", min_interval_s=0.05), transport=httpx.MockTransport(fake.handler))
+    t0 = _t.monotonic()
+    for _ in range(4):
+        c.ask({"t": "x"}, {"q": Noul(instructions="y?")})
+    assert _t.monotonic() - t0 >= 0.15  # 3 gaps between 4 requests
+
+
+def test_429_without_time_reports_rate_limited(fake):
+    fake.status = 429
+    c = JevClient(ClientConfig(api_key="k", deadline_s=0.2, max_retries=2), transport=httpx.MockTransport(fake.handler),
+                  sleep=lambda s: None)
+    with pytest.raises(JevError) as ei:
+        c.ask({"t": "x"}, {"q": Noul(instructions="y?")})
+    assert ei.value.kind == "rate_limited"

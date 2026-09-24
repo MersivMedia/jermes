@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import threading
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Mapping, Optional
@@ -64,18 +65,48 @@ class Decision:
         return self.ok and self.mode in ("advise", "enforce")
 
 
+_TOKEN_CANDIDATE = re.compile(r"[A-Za-z0-9_\-]{24,}")
+_ALNUM_RUN = re.compile(r"[A-Za-z0-9]+")
+
+
+def _looks_like_secret(tok: str) -> bool:
+    """Generic credential shape, independent of any provider's key prefix.
+
+    Hermes' redactor matches known prefixes and missed Vercel's ``vck_`` keys,
+    so this catches the class: a long unbroken token with a high-entropy run
+    (16+ alphanumerics containing at least two digits and a letter). Snake-case
+    identifiers ("generative_media_pipeline_design"), UUIDs and session ids
+    have no such run and pass through.
+    """
+    for run in _ALNUM_RUN.findall(tok):
+        if len(run) >= 16 and sum(ch.isdigit() for ch in run) >= 2 and any(ch.isalpha() for ch in run):
+            return True
+    return False
+
+
+def _redact_generic(text: str) -> str:
+    return _TOKEN_CANDIDATE.sub(
+        lambda m: (m.group(0)[:4] + "...[REDACTED]") if _looks_like_secret(m.group(0)) else m.group(0), text
+    )
+
+
 def _redact(value: Any) -> Any:
     try:
         from agent.redact import redact_sensitive_text  # type: ignore
-    except Exception:
-        return value
+    except Exception:  # standalone install: the generic layer still runs
+        redact_sensitive_text = None
+
+    def one(s: str) -> str:
+        if redact_sensitive_text is not None:
+            try:
+                s = redact_sensitive_text(s, force=True)
+            except TypeError:  # older signature without force=
+                s = redact_sensitive_text(s)
+        return _redact_generic(s)
 
     def walk(v: Any) -> Any:
         if isinstance(v, str):
-            try:
-                return redact_sensitive_text(v, force=True)
-            except TypeError:  # older signature without force=
-                return redact_sensitive_text(v)
+            return one(v)
         if isinstance(v, Mapping):
             return {k: walk(x) for k, x in v.items()}
         if isinstance(v, (list, tuple)):

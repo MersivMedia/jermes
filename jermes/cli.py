@@ -112,7 +112,7 @@ def cmd_replay(args) -> int:
 
     try:
         report = replay.run(args.db, limit=args.limit, points=args.points, since_days=args.days,
-                            only_with_skill=args.with_skill, export=args.export)
+                            only_with_skill=args.with_skill, export=args.export, interval_s=args.interval)
     except (FileNotFoundError, RuntimeError) as exc:
         print(f"FAILED: {exc}")
         return 1
@@ -143,6 +143,7 @@ class register_cli:  # namespace used by the plugin entry point
         p.add_argument("--with-skill", action="store_true", help="only turns where the agent loaded a skill")
         p.add_argument("--export", default=None, help="write disagreements to JSONL for labelling")
         p.add_argument("--json", default=None, help="write the full report as JSON")
+        p.add_argument("--interval", type=float, default=2.1, help="seconds between Jev requests (gateway allows ~30/min)")
 
     @staticmethod
     def handle(args: Any) -> int:

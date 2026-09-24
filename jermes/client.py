@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import random
+import threading
 import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Mapping, Optional
@@ -70,6 +71,7 @@ class ClientConfig:
     api_key_env: Optional[str] = None
     deadline_s: float = 2.5
     max_retries: int = 1
+    min_interval_s: float = 0.0  # pacing between requests (batch/replay use; live hooks keep 0)
     zero_data_retention: bool = False
 
     def resolved(self) -> Dict[str, Any]:
@@ -97,6 +99,19 @@ class JevClient:
         self._transport = transport
         self._sleep = sleep
         self._http: Optional[httpx.Client] = None
+        self._pace_lock = threading.Lock()
+        self._next_slot = 0.0
+
+    def _pace(self) -> None:
+        gap = self.config.min_interval_s
+        if gap <= 0:
+            return
+        with self._pace_lock:
+            now = time.monotonic()
+            wait = self._next_slot - now
+            self._next_slot = max(now, self._next_slot) + gap
+        if wait > 0:
+            self._sleep(wait)
 
     # -- plumbing ---------------------------------------------------------
 
@@ -148,6 +163,7 @@ class JevClient:
         deadline = start + self.config.deadline_s
         attempt = 0
         while True:
+            self._pace()
             remaining = deadline - time.monotonic()
             if remaining <= 0.05:
                 raise JevError("deadline exceeded", kind="timeout")
@@ -164,7 +180,8 @@ class JevClient:
                 attempt += 1
                 backoff = _retry_after(resp) or (0.2 * (2 ** attempt) + random.uniform(0, 0.1))
                 if time.monotonic() + backoff >= deadline:
-                    raise JevError(f"HTTP {resp.status_code}; no time to retry", status=resp.status_code)
+                    raise JevError(f"HTTP {resp.status_code}; no time to retry", status=resp.status_code,
+                                   kind=_error_kind(resp))
                 self._sleep(backoff)
                 continue
             raise JevError(_error_message(resp), status=resp.status_code, kind=_error_kind(resp))

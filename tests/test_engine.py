@@ -50,6 +50,16 @@ def test_off_mode_makes_no_call(make_engine, fake):
     assert d.error == "off" and not fake.requests
 
 
+def test_redacts_unknown_prefix_keys_but_not_identifiers():
+    from jermes.engine import _redact
+
+    fake_key = "vck_" + "A1b2C3d4E5f6G7h8I9j0KlMnOpQrStUv"
+    out = _redact({"request": f"here is my key {fake_key} thanks"})["request"]
+    assert fake_key not in out and "[REDACTED]" in out
+    keep = "load generative-media-pipeline-design and executive_stakeholder_research_v2 for session 20260924_211008_e9fbc1"
+    assert _redact({"request": keep})["request"] == keep
+
+
 def test_config_yaml_off_is_off(tmp_path, monkeypatch):
     from jermes.config import load_config
 

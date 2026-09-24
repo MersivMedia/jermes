@@ -113,3 +113,34 @@ def test_replay_reports_jev_outage(tmp_path, make_engine, fake):
 def test_replay_missing_db(tmp_path, make_engine):
     with pytest.raises(FileNotFoundError):
         replay.run(tmp_path / "nope.db", harness=Harness(make_engine()), progress=lambda *_: None)
+
+
+def test_iter_turns_dedupes_compaction_copies(tmp_path):
+    db = tmp_path / "state.db"
+    _db(db)
+    c = sqlite3.connect(db)
+    c.execute("INSERT INTO sessions VALUES ('s2','cli',0)")
+    c.execute("INSERT INTO messages(session_id,role,content,timestamp) VALUES ('s2','user',?,1e10)",
+              ("explain what a monad is in  simple words",))
+    c.commit()
+    c.close()
+    reqs = [t.request for t in replay.iter_turns(db, limit=10)]
+    assert sum("monad" in r for r in reqs) == 1
+
+
+def test_replay_output_never_carries_secrets(tmp_path, make_engine, fake):
+    db = tmp_path / "state.db"
+    _db(db)
+    key = "vck_" + "Z9y8X7w6V5u4T3s2R1q0PoNmLkJiHgFe"
+    c = sqlite3.connect(db)
+    c.execute("INSERT INTO messages(session_id,role,content,timestamp) VALUES ('s1','user',?,1e10)", (f"my key is {key}",))
+    c.commit()
+    c.close()
+    _ranker(fake)
+    h = Harness(make_engine(skill_suggest="shadow"))
+    h._roster = [skill_suggest.Skill("a", "x"), skill_suggest.Skill("b", "y")]
+    lines = []
+    out = tmp_path / "export.jsonl"
+    report = replay.run(db, limit=10, harness=h, export=out, progress=lines.append)
+    blob = "\n".join(lines) + json.dumps(report) + out.read_text() + json.dumps([r for r in fake.requests], default=str)
+    assert key not in blob
