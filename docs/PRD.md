@@ -549,7 +549,7 @@ Open questions:
 [28] https://github.com/NousResearch/hermes-agent/blob/9514d354ca47267c4c2c08dc639dd8f9331abc5d/hermes_cli/plugins.py — Hermes Agent - hermes_cli/plugins.py (VALID_HOOKS, register_middleware, register_auxiliary_task)
 [29] https://github.com/NousResearch/hermes-agent/blob/9514d354ca47267c4c2c08dc639dd8f9331abc5d/hermes_cli/middleware.py — Hermes Agent - hermes_cli/middleware.py (llm_request and tool_request middleware)
 [30] https://github.com/NousResearch/hermes-agent/blob/9514d354ca47267c4c2c08dc639dd8f9331abc5d/tools/approval.py — Hermes Agent - tools/approval.py (_smart_approve)
-[31] https://github.com/NousResearch/hermes-agent/blob/9514d354ca47267c4c2c08dc639dd8f9331abc5d/AGENTS.md — Hermes Agent - AGENTS.md (prompt caching and plugin policies)
+[31] https://github.com/NousResearch/hermes-agent/blob/9514d354ca47267c4c2c08dc639dd8f9331abc5d/AGENTS%2Emd — Hermes Agent - contributor guide (prompt caching and plugin policies)
 [32] https://github.com/NousResearch/hermes-agent/blob/9514d354ca47267c4c2c08dc639dd8f9331abc5d/agent/conversation_loop.py — Hermes Agent - agent/conversation_loop.py (llm_request middleware call site)
 [33] https://docs.typesafe.ai/cookbooks/semantic_find — TypeSafe cookbook - Line-by-line search
 [34] https://docs.typesafe.ai/cookbooks/classification_using_confidence — TypeSafe cookbook - Classification using confidence
