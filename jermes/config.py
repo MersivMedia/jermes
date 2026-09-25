@@ -42,7 +42,7 @@ DEFAULTS: Dict[str, Any] = {
             "shortlist": 5,           # candidates carried from the skim into the select call
             "max_listed": 4,          # skills shown to the agent (primary + supporting)
             "excerpt_chars": 700,
-            "context_messages": 4,    # earlier user/assistant turns Jev sees (0 = request only)
+            "context_messages": 10,   # earlier user/assistant turns Jev sees (0 = request only)
             "context_chars": 400,     # per message
         },
         # D3 + D4 - argument check and risk gate (pre_tool_call)

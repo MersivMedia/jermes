@@ -120,7 +120,7 @@ Load the ones that apply. Ignore any that do not match what the user actually as
 
 The skill list is read on every call through Hermes' own skill discovery, so Jev sees exactly what the agent can load: a skill created mid-session is picked up on the next request, and disabled skills are never offered. Hermes caches that scan until a skill directory changes, so re-reading it takes under a millisecond.
 
-Jev sees the latest request plus the last four user and assistant messages (400 characters each; tool output and harness notes are stripped), so follow-ups like "yes, do the invert test next" can be resolved. The request stays primary: the questions tell Jev to use the earlier turns only to work out what the request refers to.
+Jev sees the latest request plus the last ten user and assistant messages (400 characters each, about 1,000 tokens; tool output and harness notes are stripped), so follow-ups like "yes, do the invert test next" can be resolved. The request stays primary: the questions tell Jev to use the earlier turns only to work out what the request refers to.
 
 ### Guarantees built into the code
 
@@ -211,6 +211,27 @@ After changing a setting (context size, threshold), run `score` again on the sam
 
 ## Test results
 
+### Scored against hand labels (September 25, 2026)
+
+40 real turns labelled by hand with the skills that should have loaded (29 needed skills, 2.9 on average; 11 needed none). Both settings ran on the same 40 turns.
+
+| Metric | Jev, 4 messages | Jev, 10 messages (default) | What the agent loaded |
+|---|---|---|---|
+| Decision accuracy (skill vs no skill) | 88% | **90%** | 35% |
+| Primary hit (first skill correct) | 66% | **69%** | 7% |
+| Recall (needed skills listed) | **69%** | 63% | 4% |
+| Precision (listed skills needed) | **79%** | 62% | 75% |
+| False alarms (skills on a "none" turn) | **0%** | 9% (1 of 11) | 0% |
+| Misses ("none" on a turn needing a skill) | 17% | **10%** | 90% |
+
+Ten messages makes fewer misses and gets the first skill right slightly more often, at the cost of more extra suggestions. The differences are 1 to 3 turns out of 40, so they are directional, not conclusive.
+
+Caveats: the labels were filled in on a sheet that showed Jev's 4-message list, and 26 of 40 labels match that list exactly, so the 4-message column may be flattered. The agent column is low mostly because this Hermes install rarely calls `skill_view` in these sessions, not because it picks wrong skills.
+
+Most of Jev's remaining misses are one skill: `runpod-pods` was needed on 13 turns but listed on only 3 to 4. Its description ("Rent RunPod GPUs for models too big to run locally.") doesn't mention stopping pods, volumes or checking what's running, so requests like "turn off the gpu instance" go to other GPU skills. Skill descriptions are the single biggest lever on accuracy.
+
+### Replay against what the agent loaded (September 24, 2026)
+
 Measured on September 24, 2026 by replaying real past turns from one Hermes install (206 skills) through the Vercel AI Gateway. Both modes ran on exactly the same turns, and every turn got an answer in both (failed calls were retried until they succeeded).
 
 What the agent loaded is a weak label: it is what the agent did, not necessarily what was right.
@@ -254,7 +275,7 @@ backend:
   zero_data_retention: true   # Vercel only
 
 points:
-  skill_suggest: { mode: advise, fits_threshold: 0.5, max_listed: 4, context_messages: 4 }
+  skill_suggest: { mode: advise, fits_threshold: 0.5, max_listed: 4, context_messages: 10 }
   risk_gate:     { mode: enforce, block_threshold: 0.85, review_threshold: 0.5 }
   result_filter: { mode: enforce, keep_threshold: 0.35 }
   loop_guard:    { mode: advise }

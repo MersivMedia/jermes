@@ -119,3 +119,12 @@ def test_score_compares_jev_and_agent():
     assert all(r["jev_ok"] for r in rep["rows"])
     unavailable = labels.score(labs, lambda lab: None)
     assert unavailable["errors"] == 2 and unavailable["jev"]["turns"] == 0
+
+
+def test_jev_ok_is_a_real_bool_that_survives_json():
+    import json
+
+    labs = [Label("s#1", "r", ["runpod-pods"]), Label("s#2", "r", []), Label("s#3", "r", ["comfyui"])]
+    preds = {"s#1": [], "s#2": [], "s#3": ["comfyui", "x"]}
+    rep = json.loads(json.dumps(labels.score(labs, lambda lab: preds[lab.key]), default=str))
+    assert [r["jev_ok"] for r in rep["rows"]] == [False, True, True]

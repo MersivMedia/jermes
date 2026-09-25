@@ -162,11 +162,18 @@ def score(labels: Iterable[Label], predict: Callable[[Label], Optional[List[str]
             continue
         jev.add(pred, lab.skills)
         agent.add(list(dict.fromkeys(lab.agent_loaded)), lab.skills)
-        g = {_norm(x) for x in lab.skills}
         rows.append({"key": lab.key, "request": lab.request[:200], "label": lab.skills, "jev": pred,
-                     "agent": lab.agent_loaded,
-                     "jev_ok": ({_norm(p) for p in pred} & g if g else not pred) and (not g or _norm(pred[0]) in g)})
+                     "agent": lab.agent_loaded, "jev_ok": _turn_ok(pred, lab.skills)})
     return {"jev": jev.report(), "agent": agent.report(), "errors": errors, "rows": rows}
+
+
+def _turn_ok(pred: Sequence[str], gold: Sequence[str]) -> bool:
+    """A turn is right when "none" matches "none", or the first listed skill is
+    one of the labelled skills. Always a real bool (it is saved to JSON)."""
+    g = {_norm(x) for x in gold}
+    if not g:
+        return not pred
+    return bool(pred) and _norm(pred[0]) in g
 
 
 def print_score(rep: Dict[str, Any], out=print) -> None:

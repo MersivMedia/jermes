@@ -129,7 +129,7 @@ class Harness:
         by_name = {s.name: s for s in roster}
         context = skill_suggest.format_context(
             skill_suggest.history_before_request(history or [], user_message),
-            max_messages=int(cfg.get("context_messages", 4)),
+            max_messages=int(cfg.get("context_messages", 10)),
             chars_each=int(cfg.get("context_chars", 400)),
         )
         state = skill_suggest.state_for(user_message, context)
