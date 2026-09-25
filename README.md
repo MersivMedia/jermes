@@ -20,17 +20,15 @@ The design, the evidence behind it, and the rollout plan are in the **[PRD](docs
 
 ## Quick start
 
-**1. Install Hermes Agent** (skip if you have it):
-
-```bash
-curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash
-```
+**1. Install Hermes Agent** if you don't have it: see the [Hermes Agent install guide](https://github.com/NousResearch/hermes-agent#quick-install).
 
 **2. Install the plugin:**
 
 ```bash
 hermes plugins install MersivMedia/jermes --enable
 ```
+
+`MersivMedia/jermes` is shorthand for `https://github.com/MersivMedia/jermes`; either form works. Hermes scans every plugin before installing it and shows the result.
 
 **3. Add one Jev key** to `~/.hermes/.env` (pick a provider below). Jermes detects which key is set and uses that provider.
 
@@ -220,13 +218,13 @@ The biggest lever is the skills' own descriptions, not Jermes' settings. Jev's f
 3. Rewrite the `description` (and the "When to Use" triggers) to cover those things. Don't describe what the skill can't do.
 4. Run `score` again on the same labels.
 
-Example: `runpod-pods` was described as "Rent RunPod GPUs for models too big to run locally." Its script also lists, stops and terminates pods, but requests like "turn off the gpu instance now" went to other GPU skills. The rewrite to "RunPod GPU pods: launch on a network volume, check what is running, stop or terminate." took it from 3 to 8 of its 13 labelled turns.
+Example: `runpod-pods` was described as "Rent RunPod GPUs for models too big to run locally." Its script also lists, stops and terminates pods, so requests like "turn off the gpu instance now" were going to other GPU skills. Rewriting the description to cover those fixed 4 of the 40 labelled turns (see [docs/RESULTS.md](docs/RESULTS.md)).
 
 The skill list is read live, so a description change takes effect on the next request. No restart is needed.
 
 ## Test results
 
-### Current: scored against hand labels (September 25, 2026)
+### Skill selection, scored against hand labels (September 25, 2026)
 
 40 real turns from one Hermes install (about 200 skills), labelled by hand with the skills that should have loaded: 29 turns needed skills (2.9 on average), 11 needed none. Current defaults: 10 messages of context, rewritten `runpod-pods` description.
 
@@ -248,50 +246,7 @@ Caveats:
 - **The labels may lean toward Jev's old answers.** They were filled in on a sheet that showed Jev's 4-message list, and 26 of 40 matched it exactly. A blind batch would settle how much this matters.
 - **The skill list changed during testing.** A new skill (`job-interview-company-prep`) was created mid-session and now ranks first on two job-interview turns whose labels predate it. Those two count as wrong here.
 
-### What moved the numbers
-
-Each change was scored on the same 40 labels.
-
-| Change | Primary hit | Misses | Precision | Notes |
-|---|---|---|---|---|
-| Context 4 → 10 messages | 66% → 69% | 17% → 10% | 79% → 62% | Fewer misses, more extra suggestions. 10 is the default: a missed skill costs more than an extra one the agent can ignore. |
-| `runpod-pods` description rewrite | 59% → 72% | 10% → 14% | 58% → 65% | Fixed 4 turns, broke none. One turn moved from wrong skills to "no skill". |
-
-The second row's "before" is lower than the first row's "after" because the new skill had appeared in between. Each row compares like with like.
-
-### Earlier: replay against what the agent loaded (September 24, 2026)
-
-Before hand labels existed, Jev was compared with what the agent actually loaded. Measured by replaying real past turns from one Hermes install (206 skills) through the Vercel AI Gateway. Both modes ran on exactly the same turns, and every turn got an answer in both (failed calls were retried until they succeeded).
-
-What the agent loaded is a weak label: it is what the agent did, not necessarily what was right.
-
-**Turns where the agent loaded a skill (32)**
-
-| | Request only | Request + last 4 messages |
-|---|---|---|
-| Jev's primary skill = the agent's skill | 11 (34%) | 12 (38%) |
-| Agent's skill anywhere in Jev's list | 16 (50%) | **20 (63%)** |
-| Skills listed per turn (avg) | 2.5 | 2.7 |
-
-**Turns where the agent loaded no skill (49)**
-
-| | Request only | Request + last 4 messages |
-|---|---|---|
-| Jev said "no skill needed" | **26 (53%)** | 20 (41%) |
-| Skills listed per turn (avg) | 1.6 | 1.9 |
-
-Before the "no skill needed" option existed (v0.1, same kind of turns), Jev said none on 19 to 27% of these turns.
-
-Caveat: these runs had a replay bug (since fixed) that filled part of the context window with blank tool-call turns, so on tool-heavy turns Jev saw fewer earlier messages than the live hook would give it. The "with context" column probably understates what context does in live use.
-
-What this shows:
-
-- **The "no skill needed" option works.** Jev declines about twice as often as with v0.1's gate questions.
-- **Conversation context helps with follow-ups.** With context, Jev found the right skill for "Throw Some Ass [link]" (audio mixing) and "process this video like you did with the previous one" (the brand-edit skill). With the request alone it returned nothing for both.
-- **Context also makes Jev more willing to suggest a skill.** Short follow-ups such as "let's try masked" or "build and run it now" pick up skills from the earlier topic. Some of those may be right and the agent simply didn't load them. That tradeoff needs labelling before `skill_suggest` moves past shadow.
-- **Primary-skill agreement is modest (about 1 in 3).** Most misses are close calls between related skills (for example `research-design-documents` vs `grounded-citations`, or `runpod-pods` vs `ai-cover-songs`). That is the case the list output is for.
-
-Cost and load: the whole comparison (about 290 live calls) used 1.56M input tokens, about $0.07. One request costs roughly 10k tokens (a skim of about 8.3k over 206 skills plus a select call of about 2k). The latency recorded during this run includes replay's pacing and rate-limit waits, so it does not reflect live latency; a single live call measured 0.8 to 2 s. With a new Vercel account's limit of 30 requests per window and two calls per request, skill selection alone can use that limit up in a busy session. Plan for a higher limit, or another provider, before running it live.
+Earlier measurements, and what each change did to these numbers, are in [docs/RESULTS.md](docs/RESULTS.md).
 
 ## Known issues and limits
 
