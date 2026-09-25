@@ -89,8 +89,11 @@ class ClientConfig:
             raise JevError(f"unknown backend {self.backend!r}", kind="config")
         preset = BACKENDS[self.backend]
         key_env = self.api_key_env or preset["api_key_env"]
+        # The official TypeSafe SDKs read TYPESAFE_BASE_URL; honour it for the typesafe
+        # backend so a gateway/proxy is configured once, beside TYPESAFE_API_KEY.
+        env_base = os.environ.get("TYPESAFE_BASE_URL", "").strip() if self.backend == "typesafe" else ""
         return {
-            "base_url": (self.base_url or preset["base_url"]).rstrip("/"),
+            "base_url": (self.base_url or env_base or preset["base_url"]).rstrip("/"),
             "model": self.model or preset["model"],
             "api_key": self.api_key or os.environ.get(key_env, ""),
             "api_key_env": key_env,
