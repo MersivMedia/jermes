@@ -118,6 +118,8 @@ Load the ones that apply. Ignore any that do not match what the user actually as
 </skill_relevance>
 ```
 
+The skill list is read on every call through Hermes' own skill discovery, so Jev sees exactly what the agent can load: a skill created mid-session is picked up on the next request, and disabled skills are never offered. Hermes caches that scan until a skill directory changes, so re-reading it takes under a millisecond.
+
 Jev sees the latest request plus the last four user and assistant messages (400 characters each; tool output and harness notes are stripped), so follow-ups like "yes, do the invert test next" can be resolved. The request stays primary: the questions tell Jev to use the earlier turns only to work out what the request refers to.
 
 ### Guarantees built into the code
@@ -136,6 +138,8 @@ hermes jermes status    # provider, key, per-point modes
 hermes jermes check     # one live Jev call with a harmless sample
 hermes jermes rank "make me a pitch deck as a pptx"   # Jev's skill list for one request
 hermes jermes replay    # shadow-test over your real past sessions (below)
+hermes jermes label     # hand-label real turns: which skills should have loaded
+hermes jermes score     # score Jev and the agent against your labels
 hermes jermes stats     # decisions, cache hits, latency, tokens per point
 hermes jermes recent    # last decisions
 ```
@@ -164,6 +168,46 @@ What the agent loaded is a weak label: the agent itself picks the wrong skill pa
 Replay is offline, so it paces requests to stay under the gateway's rate limit (2.1 s apart by default, `--interval` to change) and waits out 429s and 503s instead of failing. A 50-turn run takes 5 to 15 minutes and costs about $0.02 (roughly 10k input tokens per turn with a 206-skill roster). Repeat runs are free because decisions are cached.
 
 For live shadow mode, use Hermes normally. Every point logs what it would have done, and `hermes jermes stats` / `recent` show the results.
+
+## Score the results
+
+Comparing Jev with what the agent loaded only shows agreement. To measure *correctness* you need an answer key: a set of real turns where you have written down which skills should have loaded. About 40 labelled turns is enough to compare settings. 100 or more gives numbers you can tune thresholds against.
+
+**Label in the terminal**, one turn at a time. Each turn shows the request, the conversation just before it, what the agent loaded and what Jev lists:
+
+```bash
+hermes jermes label -n 40
+#   enter = accept Jev's list    a = accept what the agent loaded    n = no skill needed
+#   or type skill names, comma-separated    s = skip    q = quit (resume any time)
+```
+
+**Or label in a spreadsheet** (easier on a phone):
+
+```bash
+hermes jermes label -n 40 --export labels.csv     # fill in the correct_skills column
+hermes jermes label --import labels.csv           # or --import gdrive:<sheet-id> for a Google Sheet
+```
+
+Skill names are checked on import, and typos come back with suggestions. Labels are stored in `$HERMES_HOME/jermes/labels.jsonl`; relabelling a turn replaces the old answer.
+
+**Score:**
+
+```bash
+hermes jermes score
+```
+
+The score reruns Jev on every labelled turn (cached decisions are free) and reports each metric for Jev and for what the agent actually loaded:
+
+| Metric | Meaning |
+|---|---|
+| Decision accuracy | Got "skill vs no skill" right |
+| Primary hit | Jev's first skill is one of the correct ones |
+| Recall | Share of the correct skills that appear in the list |
+| Precision | Share of the listed skills that were correct |
+| False alarms | Listed skills on a turn that needed none |
+| Misses | Said "no skill" on a turn that needed one |
+
+After changing a setting (context size, threshold), run `score` again on the same labels to see what moved.
 
 ## Test results
 
@@ -234,6 +278,7 @@ The end-to-end test loads Jermes through Hermes' real `PluginManager` in a tempo
 - [x] Phase 0: client, cache, log, modes, and five decision points in shadow mode
 - [x] Replay harness over real sessions; first live measurements
 - [x] Skill selection v3: list output, "no skill needed" option, conversation context
+- [x] Skill list read on every call (new skills seen mid-session); hand-labelling and scoring
 - [ ] Label shadow logs from real sessions; tune thresholds per point
 - [ ] Phase 1 to 2: promote `result_filter`, `skill_suggest`, `risk_gate`
 - [ ] Data-ingestion pipeline (PRD §6): intake, triage, select-don't-generate extraction, verify-then-escalate cascade

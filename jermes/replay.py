@@ -112,10 +112,11 @@ def iter_turns(db: Path, *, limit: int = 50, min_chars: int = 15, since_days: Op
                             loaded.append(str(skill))
             if only_with_skill and not loaded:
                 continue
-            # Same shape Hermes passes to pre_llm_call as conversation_history.
+            # Same shape Hermes passes to pre_llm_call as conversation_history. Tool-call-only
+            # assistant turns have blank content; skip them so they don't eat the window.
             prior = conn.execute(
                 "SELECT role, content FROM messages WHERE session_id=? AND id<? AND role IN ('user','assistant') "
-                "AND content IS NOT NULL ORDER BY id DESC LIMIT 12", (sid, mid)
+                "AND content IS NOT NULL AND trim(content) != '' ORDER BY id DESC LIMIT 20", (sid, mid)
             ).fetchall()
             history = [{"role": r, "content": c} for r, c in reversed(prior)]
             yield Turn(sid, mid, content, loaded, calls, history)

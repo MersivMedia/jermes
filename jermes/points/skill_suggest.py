@@ -63,6 +63,80 @@ class Skill:
     category: str = ""
 
 
+def current_roster() -> List[Skill]:
+    """The skills the agent can load *right now*, read on every call.
+
+    Uses Hermes' own discovery (``tools.skills_tool._find_all_skills``), the
+    same function behind the agent's ``skills_list``, so Jermes sees exactly
+    what the agent sees: disabled skills, platform/environment gating and
+    project-skill trust are all applied. Hermes caches that scan keyed by a
+    signature of the skill directories' mtimes, so a skill created mid-session
+    shows up on the next call, and repeated calls cost almost nothing.
+
+    Bodies are not loaded here: only the shortlist needs them (``skill_body``).
+    Falls back to a direct scan when Hermes' helper is unavailable.
+    """
+    try:
+        from tools.skills_tool import _find_all_skills  # type: ignore
+    except Exception:
+        return load_roster()
+    try:
+        found = _find_all_skills()
+    except Exception:
+        return load_roster()
+    out = {}
+    for s in found:
+        name = str(s.get("name") or "").strip()
+        if name and name != NONE_OPTION and name not in out:
+            out[name] = Skill(name=name, description=str(s.get("description") or "").strip(),
+                              category=str(s.get("category") or ""))
+    return sorted(out.values(), key=lambda s: s.name)
+
+
+_BODY_PATHS: Dict[str, Path] = {}
+
+
+def _index_skill_paths() -> None:
+    try:
+        from agent.skill_utils import get_all_skills_dirs, iter_skill_index_files, parse_frontmatter  # type: ignore
+    except Exception:
+        return
+    found: Dict[str, Path] = {}
+    for root in get_all_skills_dirs():
+        root = Path(root)
+        if not root.exists():
+            continue
+        for path in iter_skill_index_files(root, "SKILL.md"):
+            try:
+                meta, _ = parse_frontmatter(Path(path).read_text(encoding="utf-8", errors="replace")[:4000])
+            except Exception:
+                continue
+            name = str(meta.get("name") or Path(path).parent.name).strip()
+            found.setdefault(name, Path(path))
+    _BODY_PATHS.clear()
+    _BODY_PATHS.update(found)
+
+
+def skill_body(skill: Skill) -> str:
+    """SKILL.md body for one skill, read fresh (so edits are seen). The
+    name -> path index is rebuilt only when a name is unknown or its file moved."""
+    if skill.body:
+        return skill.body
+    path = _BODY_PATHS.get(skill.name)
+    if path is None or not path.exists():
+        _index_skill_paths()
+        path = _BODY_PATHS.get(skill.name)
+    if path is None:
+        return ""
+    try:
+        from agent.skill_utils import parse_frontmatter  # type: ignore
+
+        _, body = parse_frontmatter(path.read_text(encoding="utf-8", errors="replace"))
+        return body.strip()
+    except Exception:
+        return ""
+
+
 def load_roster() -> List[Skill]:
     """Read the active profile's skills via Hermes' own helpers."""
     try:
@@ -135,10 +209,12 @@ def history_before_request(history: Sequence[Mapping[str, Any]], request: str) -
     return msgs
 
 
-def state_for(user_message: str, recent_context: str = "") -> Dict[str, Any]:
+def state_for(user_message: str, recent_context: str = "", *, max_context_chars: int = 20000) -> Dict[str, Any]:
+    # The context is already sized by format_context (messages x chars each);
+    # this cap is only a backstop well inside Jev's 32k-token state budget.
     state: Dict[str, Any] = {"request": user_message[:6000]}
     if recent_context:
-        state["recent_context"] = recent_context[:2400]
+        state["recent_context"] = recent_context[:max_context_chars]
     return state
 
 
@@ -182,7 +258,7 @@ def select_questions(names: Sequence[str], by_name: Mapping[str, Skill], excerpt
                      *, with_context: bool = False) -> Dict[str, Any]:
     note = f" {_CONTEXT_NOTE}" if with_context else ""
     criteria: Dict[str, Optional[str]] = {
-        n: f"{by_name[n].description} — {by_name[n].body[:excerpt_chars]}" for n in names
+        n: f"{by_name[n].description} — {skill_body(by_name[n])[:excerpt_chars]}" for n in names
     }
     criteria[NONE_OPTION] = NONE_CRITERIA
     qs: Dict[str, Any] = {

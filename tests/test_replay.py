@@ -168,3 +168,18 @@ def test_replay_retries_failed_turns_after_cooldown(tmp_path, make_engine, fake)
 
     rep = replay.replay_skills(h, list(replay.iter_turns(db)), sleep=cooldown, progress=None)
     assert slept == [60.0] and rep["errors"] == 0 and rep["turns"] == 2
+
+
+def test_history_skips_blank_tool_call_turns(tmp_path):
+    db = tmp_path / "state.db"
+    _db(db)
+    c = sqlite3.connect(db)
+    for _ in range(25):  # a long tool-calling stretch before the next request
+        c.execute("INSERT INTO messages(session_id,role,content,tool_calls,timestamp) VALUES ('s1','assistant','','[]',1e10)")
+    c.execute("INSERT INTO messages(session_id,role,content,timestamp) VALUES ('s1','user','now make it a pptx deck',1e10)")
+    c.commit()
+    c.close()
+    t = next(replay.iter_turns(db, limit=1))
+    assert t.request.startswith("now make it") and t.history
+    assert all(m["content"].strip() for m in t.history)
+    assert any("monad" in m["content"] for m in t.history)  # earlier real text survives the blank stretch

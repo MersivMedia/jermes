@@ -4,6 +4,8 @@
     check    one live Jev call with a harmless sample, to verify access
     rank     rank skills for one request:  jermes rank "make me a pitch deck"
     replay   shadow-replay real past turns from Hermes' state.db (offline)
+    label    hand-label real turns with the skills that should load (answer key)
+    score    score Jev (and the agent) against your labels
     stats    decisions per point and mode, cache hits, latency, tokens
     recent   last N logged decisions
 """
@@ -143,6 +145,85 @@ def cmd_replay(args) -> int:
     return 0
 
 
+def _labelling_harness():
+    from . import replay
+    from .harness import Harness
+
+    h = Harness()
+    h.background_shadow = False
+    replay._batch_mode(h, interval_s=2.1)
+    return h
+
+
+def _jev_list(h, t):
+    r = h.rank_skills(f"replay:{t.session_id}", t.request, t.history)
+    return None if r is None else [x["skill"] for x in r]
+
+
+def cmd_label(args) -> int:
+    from . import labels, replay
+
+    h = _labelling_harness()
+    known = [s.name for s in h.roster()]
+    turns = list(replay.iter_turns(replay.default_db(), limit=args.limit, only_with_skill=args.with_skill))
+    if args.export:
+        n = labels.export_sheet(turns, lambda t: _jev_list(h, t), Path(args.export))
+        print(f"wrote {n} turns to {args.export}")
+        print(labels.SHEET_HELP)
+        print(f"then: hermes jermes label --import {args.export}")
+        return 0
+    if args.import_:
+        src = args.import_
+        if src.startswith("gdrive:"):
+            src = _download_sheet_csv(src.split(":", 1)[1])
+        rep = labels.import_sheet(Path(src), known)
+        print(f"imported {rep['added']} labels ({rep['blank']} blank rows skipped)")
+        for p in rep["problems"]:
+            print("  " + p)
+        return 1 if rep["problems"] else 0
+    labels.interactive(turns, lambda t: _jev_list(h, t), known)
+    return 0
+
+
+def _download_sheet_csv(file_id: str) -> str:
+    """Export a Google Sheet as CSV via the google-workspace skill's Drive auth."""
+    import tempfile
+
+    from google.oauth2.credentials import Credentials  # type: ignore
+    from googleapiclient.discovery import build  # type: ignore
+
+    from .store import hermes_home
+
+    creds = Credentials.from_authorized_user_file(str(hermes_home() / "google_token.json"))
+    data = build("drive", "v3", credentials=creds).files().export(fileId=file_id, mimeType="text/csv").execute()
+    fh = tempfile.NamedTemporaryFile("wb", suffix=".csv", delete=False)
+    fh.write(data)
+    fh.close()
+    return fh.name
+
+
+def cmd_score(args) -> int:
+    from . import labels, replay
+
+    labs = labels.load_labels()
+    if not labs:
+        print("no labels yet: run `hermes jermes label` first")
+        return 1
+    h = _labelling_harness()
+    turns = {labels.turn_key(t.session_id, t.message_id): t
+             for t in replay.iter_turns(replay.default_db(), limit=100000)}
+
+    def predict(lab):
+        t = turns.get(lab.key)
+        return None if t is None else _jev_list(h, t)
+
+    rep = labels.score(labs.values(), predict)
+    labels.print_score(rep)
+    if args.json:
+        Path(args.json).write_text(json.dumps(rep, indent=2, default=str), encoding="utf-8")
+    return 0
+
+
 class register_cli:  # namespace used by the plugin entry point
     @staticmethod
     def setup(parser: argparse.ArgumentParser) -> None:
@@ -165,12 +246,19 @@ class register_cli:  # namespace used by the plugin entry point
         p.add_argument("--json", default=None, help="write the full report as JSON")
         p.add_argument("--interval", type=float, default=2.1, help="seconds between Jev requests (gateway allows ~30/min)")
         p.add_argument("--no-context", action="store_true", help="send only the request, no earlier conversation")
+        p = sub.add_parser("label", help="hand-label real turns with the skills that should load")
+        p.add_argument("-n", "--limit", type=int, default=40, help="recent real turns to offer")
+        p.add_argument("--with-skill", action="store_true", help="only turns where the agent loaded a skill")
+        p.add_argument("--export", default=None, help="write a CSV to fill in (e.g. in Google Sheets) instead")
+        p.add_argument("--import", dest="import_", default=None, help="read labels back from a filled-in CSV, or gdrive:<sheet-id> for a Google Sheet")
+        p = sub.add_parser("score", help="score Jev and the agent against your labels")
+        p.add_argument("--json", default=None, help="write the full report as JSON")
 
     @staticmethod
     def handle(args: Any) -> int:
         cmd = getattr(args, "jermes_cmd", None) or "status"
         return {"status": cmd_status, "stats": cmd_stats, "recent": cmd_recent, "check": cmd_check,
-                "rank": cmd_rank, "replay": cmd_replay}[cmd](args)
+                "rank": cmd_rank, "replay": cmd_replay, "label": cmd_label, "score": cmd_score}[cmd](args)
 
 
 def main(argv: Optional[List[str]] = None) -> int:

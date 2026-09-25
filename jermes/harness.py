@@ -105,9 +105,11 @@ class Harness:
         return skill_suggest.ranking_block(ranking)
 
     def roster(self) -> list:
-        if self._roster is None:
-            self._roster = skill_suggest.load_roster()
-        return self._roster
+        """Read fresh on every call so skills created mid-session are seen.
+        ``_roster`` is a fixed override for tests."""
+        if self._roster is not None:
+            return self._roster
+        return skill_suggest.current_roster()
 
     def rank_skills(self, session_id: str, user_message: str, history: Optional[list] = None) -> Optional[list]:
         """Filter the skill roster down to the skills worth loading for one request.
