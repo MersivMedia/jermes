@@ -232,6 +232,8 @@ What the agent loaded is a weak label: it is what the agent did, not necessarily
 
 Before the "no skill needed" option existed (v0.1, same kind of turns), Jev said none on 19 to 27% of these turns.
 
+Caveat: these runs had a replay bug (since fixed) that filled part of the context window with blank tool-call turns, so on tool-heavy turns Jev saw fewer earlier messages than the live hook would give it. The "with context" column probably understates what context does in live use.
+
 What this shows:
 
 - **The "no skill needed" option works.** Jev declines about twice as often as with v0.1's gate questions.
