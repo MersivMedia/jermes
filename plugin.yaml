@@ -1,5 +1,5 @@
 name: jermes
-version: "0.2.0"
+version: "0.3.0"
 description: "Jev decision layer for Hermes Agent. Moves bounded agent decisions (skill selection, tool risk, result relevance, loop detection, model routing) out of the reasoning model into code that consults TypeSafe's Jev via Vercel AI Gateway, OpenRouter, or TypeSafe directly. Ships in shadow mode: logs what it would do and changes nothing until promoted."
 author: "Mersiv Media"
 # One of these is needed; whichever is set picks the backend (see README).

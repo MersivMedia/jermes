@@ -5,7 +5,7 @@ turn is confidently easy and low-stakes, an ``llm_request`` middleware swaps
 the ``model`` kwarg for ``cheap_model`` on every API call *in that turn*, so
 the provider prompt cache is reused within the tool loop.
 
-Scope in v0.1: same-provider routing only (just the model name changes).
+Current scope: same-provider routing only (just the model name changes).
 Cross-provider routing needs ``llm_execution`` middleware and is deferred.
 Nothing happens unless ``cheap_model`` is configured and mode is ``enforce``.
 """

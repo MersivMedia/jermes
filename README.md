@@ -14,7 +14,9 @@ Jev only supplies the judgment. Code owns the policy: thresholds you can read de
 
 The design, the evidence behind it, and the rollout plan are in the **[PRD](docs/PRD.md)**.
 
-> **Status: v0.2, Phase 0 (shadow mode).** Every decision point ships in `shadow`. Jermes calls Jev and logs what it *would* do, but changes nothing in Hermes until you promote a point. Measured results so far are in [Test results](#test-results).
+> **Status: v0.3, Phase 0 (shadow mode).** Every decision point ships in `shadow`. Jermes calls Jev and logs what it *would* do, but changes nothing in Hermes until you promote a point.
+>
+> Skill selection is the most developed point. Scored against 40 hand-labelled real turns, Jev makes the right "skill vs no skill" call 88% of the time and names a correct first skill 72% of the time; the agent on its own loaded a correct skill on 7% of the turns that needed one. Details in [Test results](#test-results).
 
 ## Quick start
 
@@ -62,7 +64,7 @@ All three speak TypeSafe's System One wire format (`POST /v1/systemone`) and ret
 **Vercel AI Gateway**
 
 1. In the Vercel dashboard, open your team's AI Gateway page and create an API key.
-2. Add a credit card to the same team: [AI Gateway card prompt](https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai%3Fmodal%3Dadd-credit-card). Upgrading the team plan alone did not clear the 403 in our testing; this prompt did. Jev is free on the gateway until Sept 25, 2026, but the card is still required.
+2. Add a credit card to the same team: [AI Gateway card prompt](https://vercel.com/d?to=%2F%5Bteam%5D%2F%7E%2Fai%3Fmodal%3Dadd-credit-card). Upgrading the team plan alone did not clear the 403 in our testing; this prompt did. Vercel launched Jev as free until Sept 25, 2026; the card is required either way.
 3. Add the key to `~/.hermes/.env`:
 
    ```bash
@@ -165,7 +167,7 @@ The report compares Jev's list with the skill the agent actually loaded in that 
 
 What the agent loaded is a weak label: the agent itself picks the wrong skill part of the time. Treat disagreements as things to review, not as Jev errors.
 
-Replay is offline, so it paces requests to stay under the gateway's rate limit (2.1 s apart by default, `--interval` to change) and waits out 429s and 503s instead of failing. A 50-turn run takes 5 to 15 minutes and costs about $0.02 (roughly 10k input tokens per turn with a 206-skill roster). Repeat runs are free because decisions are cached.
+Replay is offline, so it paces requests to stay under the gateway's rate limit (2.1 s apart by default, `--interval` to change) and waits out 429s and 503s instead of failing. A 50-turn run takes 5 to 15 minutes and costs about $0.02 (roughly 10k input tokens per turn with about 200 skills). Repeat runs are free because decisions are cached.
 
 For live shadow mode, use Hermes normally. Every point logs what it would have done, and `hermes jermes stats` / `recent` show the results.
 
@@ -209,30 +211,57 @@ The score reruns Jev on every labelled turn (cached decisions are free) and repo
 
 After changing a setting (context size, threshold), run `score` again on the same labels to see what moved.
 
+### Improving accuracy
+
+The biggest lever is the skills' own descriptions, not Jermes' settings. Jev's first call only sees each skill's name and one-line description. If a description covers half of what the skill does, Jev will miss the other half.
+
+1. Run `hermes jermes score` and look at the "Jev got N wrong" list.
+2. When one skill keeps being missed, open its `SKILL.md` and its scripts and check what it *actually* does.
+3. Rewrite the `description` (and the "When to Use" triggers) to cover those things. Don't describe what the skill can't do.
+4. Run `score` again on the same labels.
+
+Example: `runpod-pods` was described as "Rent RunPod GPUs for models too big to run locally." Its script also lists, stops and terminates pods, but requests like "turn off the gpu instance now" went to other GPU skills. The rewrite to "RunPod GPU pods: launch on a network volume, check what is running, stop or terminate." took it from 3 to 8 of its 13 labelled turns.
+
+The skill list is read live, so a description change takes effect on the next request. No restart is needed.
+
 ## Test results
 
-### Scored against hand labels (September 25, 2026)
+### Current: scored against hand labels (September 25, 2026)
 
-40 real turns labelled by hand with the skills that should have loaded (29 needed skills, 2.9 on average; 11 needed none). Both settings ran on the same 40 turns.
+40 real turns from one Hermes install (about 200 skills), labelled by hand with the skills that should have loaded: 29 turns needed skills (2.9 on average), 11 needed none. Current defaults: 10 messages of context, rewritten `runpod-pods` description.
 
-| Metric | Jev, 4 messages | Jev, 10 messages (default) | What the agent loaded |
-|---|---|---|---|
-| Decision accuracy (skill vs no skill) | 88% | **90%** | 35% |
-| Primary hit (first skill correct) | 66% | **69%** | 7% |
-| Recall (needed skills listed) | **69%** | 63% | 4% |
-| Precision (listed skills needed) | **79%** | 62% | 75% |
-| False alarms (skills on a "none" turn) | **0%** | 9% (1 of 11) | 0% |
-| Misses ("none" on a turn needing a skill) | 17% | **10%** | 90% |
+| Metric | Jev | What the agent loaded |
+|---|---|---|
+| Decision accuracy (skill vs no skill) | **88%** | 35% |
+| Primary hit (first skill correct) | **72%** | 7% |
+| Recall (needed skills listed) | **61%** | 4% |
+| Precision (listed skills needed) | 65% | 75% |
+| False alarms (skills on a "none" turn) | 9% (1 of 11) | 0% |
+| Misses ("none" on a turn needing a skill) | **14%** | 90% |
+| Skills listed per turn | 2.0 | 0.1 |
 
-Ten messages makes fewer misses and gets the first skill right slightly more often, at the cost of more extra suggestions. The differences are 1 to 3 turns out of 40, so they are directional, not conclusive.
+The agent column is low mostly because this install rarely called `skill_view` in these sessions. Its precision is high because on the few turns it did load a skill, it was usually right.
 
-Caveats: the labels were filled in on a sheet that showed Jev's 4-message list, and 26 of 40 labels match that list exactly, so the 4-message column may be flattered. The agent column is low mostly because this Hermes install rarely calls `skill_view` in these sessions, not because it picks wrong skills.
+Caveats:
 
-Most of Jev's remaining misses are one skill: `runpod-pods` was needed on 13 turns but listed on only 3 to 4. Its description ("Rent RunPod GPUs for models too big to run locally.") doesn't mention stopping pods, volumes or checking what's running, so requests like "turn off the gpu instance" go to other GPU skills. Skill descriptions are the single biggest lever on accuracy. Rewriting it to "RunPod GPU pods: launch on a network volume, check what is running, stop or terminate." (after checking the skill's script really does each of those) raised `runpod-pods` from 3 to 8 of its 13 turns and primary hit from 59% to 72% on the same labels, with no new false alarms.
+- **40 turns is small.** A difference of one turn moves some rows by 3 to 9 points.
+- **The labels may lean toward Jev's old answers.** They were filled in on a sheet that showed Jev's 4-message list, and 26 of 40 matched it exactly. A blind batch would settle how much this matters.
+- **The skill list changed during testing.** A new skill (`job-interview-company-prep`) was created mid-session and now ranks first on two job-interview turns whose labels predate it. Those two count as wrong here.
 
-### Replay against what the agent loaded (September 24, 2026)
+### What moved the numbers
 
-Measured on September 24, 2026 by replaying real past turns from one Hermes install (206 skills) through the Vercel AI Gateway. Both modes ran on exactly the same turns, and every turn got an answer in both (failed calls were retried until they succeeded).
+Each change was scored on the same 40 labels.
+
+| Change | Primary hit | Misses | Precision | Notes |
+|---|---|---|---|---|
+| Context 4 → 10 messages | 66% → 69% | 17% → 10% | 79% → 62% | Fewer misses, more extra suggestions. 10 is the default: a missed skill costs more than an extra one the agent can ignore. |
+| `runpod-pods` description rewrite | 59% → 72% | 10% → 14% | 58% → 65% | Fixed 4 turns, broke none. One turn moved from wrong skills to "no skill". |
+
+The second row's "before" is lower than the first row's "after" because the new skill had appeared in between. Each row compares like with like.
+
+### Earlier: replay against what the agent loaded (September 24, 2026)
+
+Before hand labels existed, Jev was compared with what the agent actually loaded. Measured by replaying real past turns from one Hermes install (206 skills) through the Vercel AI Gateway. Both modes ran on exactly the same turns, and every turn got an answer in both (failed calls were retried until they succeeded).
 
 What the agent loaded is a weak label: it is what the agent did, not necessarily what was right.
 
@@ -264,6 +293,14 @@ What this shows:
 
 Cost and load: the whole comparison (about 290 live calls) used 1.56M input tokens, about $0.07. One request costs roughly 10k tokens (a skim of about 8.3k over 206 skills plus a select call of about 2k). The latency recorded during this run includes replay's pacing and rate-limit waits, so it does not reflect live latency; a single live call measured 0.8 to 2 s. With a new Vercel account's limit of 30 requests per window and two calls per request, skill selection alone can use that limit up in a busy session. Plan for a higher limit, or another provider, before running it live.
 
+## Known issues and limits
+
+- **Vercel rate limits.** A new Vercel account allowed 30 requests per window. Skill selection makes two calls per request. Normal use, with pauses while you read replies, should stay under that; back-to-back automation will not.
+- **Vercel 503s.** During testing, up to about 20% of calls got a temporary 503 from the gateway. Live hooks fail open (Hermes carries on unchanged); replay retries.
+- **OpenRouter is untested live.** The request format matches OpenRouter's documentation and is covered by tests, but no live call has been made with an OpenRouter key yet.
+- **Live latency hasn't been measured.** Single calls took 0.8 to 2 s. Timings recorded during replay include deliberate waits, so they don't reflect live use.
+- **Only skill selection has been scored.** `risk_gate`, `result_filter`, `loop_guard` and `model_router` are built and tested offline, but have no labelled results yet.
+
 ## Configure
 
 Optional file at `$HERMES_HOME/jermes/config.yaml`. Anything you leave out uses the defaults in [`jermes/config.py`](jermes/config.py).
@@ -290,11 +327,15 @@ Modes: `off` → `shadow` (log only) → `advise` (notes and suggestions) → `e
 
 ```bash
 uv venv && uv pip install -e '.[dev]'
-pytest                                  # offline tests; Jev is faked at the HTTP layer
+pytest                                  # 83 tests, offline; Jev is faked at the HTTP layer
 HERMES_AGENT_DIR=~/hermes-agent pytest  # also runs the end-to-end test against a real Hermes checkout
 ```
 
-The end-to-end test loads Jermes through Hermes' real `PluginManager` in a temporary `HERMES_HOME`, enables it, and fires `pre_tool_call` through Hermes' own dispatch. It checks that a dangerous call is blocked and a benign one passes.
+The end-to-end tests run against a real Hermes checkout in a temporary `HERMES_HOME`:
+
+- load Jermes through Hermes' `PluginManager`, fire `pre_tool_call` through Hermes' own dispatch, and check a dangerous call is blocked and a benign one passes
+- create a skill mid-session and check the very next Jev call sees it
+- check disabled skills are never offered
 
 ## Roadmap (from the PRD)
 
@@ -302,7 +343,10 @@ The end-to-end test loads Jermes through Hermes' real `PluginManager` in a tempo
 - [x] Replay harness over real sessions; first live measurements
 - [x] Skill selection v3: list output, "no skill needed" option, conversation context
 - [x] Skill list read on every call (new skills seen mid-session); hand-labelling and scoring
-- [ ] Label shadow logs from real sessions; tune thresholds per point
+- [x] First 40 hand labels; context set to 10 messages; first skill-description fix
+- [ ] Blind labelling batch (Jev's answer hidden) and 100+ labels; tune `fits_threshold`
+- [ ] Live latency test; OpenRouter live test
+- [ ] Label and score `risk_gate`, `result_filter`, `loop_guard`
 - [ ] Phase 1 to 2: promote `result_filter`, `skill_suggest`, `risk_gate`
 - [ ] Data-ingestion pipeline (PRD §6): intake, triage, select-don't-generate extraction, verify-then-escalate cascade
 - [ ] Workstream 3 extras (PRD §7): gateway triage, cron wake gating, memory filter, citation checks

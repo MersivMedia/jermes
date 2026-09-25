@@ -25,6 +25,7 @@ from typing import Any, Callable, Dict, Mapping, Optional
 
 import httpx
 
+from . import __version__
 from .questions import Answer, Question, parse_answer, questions_to_wire
 
 BACKENDS: Dict[str, Dict[str, str]] = {
@@ -128,7 +129,7 @@ class JevClient:
         if self._http is None:
             self._http = httpx.Client(
                 transport=self._transport,
-                headers={"User-Agent": "jermes/0.1 (+https://github.com/MersivMedia/jermes)"},
+                headers={"User-Agent": f"jermes/{__version__} (+https://github.com/MersivMedia/jermes)"},
             )
         return self._http
 
