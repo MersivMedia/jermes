@@ -228,7 +228,7 @@ Ten messages makes fewer misses and gets the first skill right slightly more oft
 
 Caveats: the labels were filled in on a sheet that showed Jev's 4-message list, and 26 of 40 labels match that list exactly, so the 4-message column may be flattered. The agent column is low mostly because this Hermes install rarely calls `skill_view` in these sessions, not because it picks wrong skills.
 
-Most of Jev's remaining misses are one skill: `runpod-pods` was needed on 13 turns but listed on only 3 to 4. Its description ("Rent RunPod GPUs for models too big to run locally.") doesn't mention stopping pods, volumes or checking what's running, so requests like "turn off the gpu instance" go to other GPU skills. Skill descriptions are the single biggest lever on accuracy.
+Most of Jev's remaining misses are one skill: `runpod-pods` was needed on 13 turns but listed on only 3 to 4. Its description ("Rent RunPod GPUs for models too big to run locally.") doesn't mention stopping pods, volumes or checking what's running, so requests like "turn off the gpu instance" go to other GPU skills. Skill descriptions are the single biggest lever on accuracy. Rewriting it to "RunPod GPU pods: launch on a network volume, check what is running, stop or terminate." (after checking the skill's script really does each of those) raised `runpod-pods` from 3 to 8 of its 13 turns and primary hit from 59% to 72% on the same labels, with no new false alarms.
 
 ### Replay against what the agent loaded (September 24, 2026)
 
