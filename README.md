@@ -167,7 +167,35 @@ For live shadow mode, use Hermes normally. Every point logs what it would have d
 
 ## Test results
 
-Live replay results against real sessions are being collected and will be posted here.
+Measured on September 24, 2026 by replaying real past turns from one Hermes install (206 skills) through the Vercel AI Gateway. Both modes ran on exactly the same turns, and every turn got an answer in both (failed calls were retried until they succeeded).
+
+What the agent loaded is a weak label: it is what the agent did, not necessarily what was right.
+
+**Turns where the agent loaded a skill (32)**
+
+| | Request only | Request + last 4 messages |
+|---|---|---|
+| Jev's primary skill = the agent's skill | 11 (34%) | 12 (38%) |
+| Agent's skill anywhere in Jev's list | 16 (50%) | **20 (63%)** |
+| Skills listed per turn (avg) | 2.5 | 2.7 |
+
+**Turns where the agent loaded no skill (49)**
+
+| | Request only | Request + last 4 messages |
+|---|---|---|
+| Jev said "no skill needed" | **26 (53%)** | 20 (41%) |
+| Skills listed per turn (avg) | 1.6 | 1.9 |
+
+Before the "no skill needed" option existed (v0.1, same kind of turns), Jev said none on 19 to 27% of these turns.
+
+What this shows:
+
+- **The "no skill needed" option works.** Jev declines about twice as often as with v0.1's gate questions.
+- **Conversation context helps with follow-ups.** With context, Jev found the right skill for "Throw Some Ass [link]" (audio mixing) and "process this video like you did with the previous one" (the brand-edit skill). With the request alone it returned nothing for both.
+- **Context also makes Jev more willing to suggest a skill.** Short follow-ups such as "let's try masked" or "build and run it now" pick up skills from the earlier topic. Some of those may be right and the agent simply didn't load them. That tradeoff needs labelling before `skill_suggest` moves past shadow.
+- **Primary-skill agreement is modest (about 1 in 3).** Most misses are close calls between related skills (for example `research-design-documents` vs `grounded-citations`, or `runpod-pods` vs `ai-cover-songs`). That is the case the list output is for.
+
+Cost and load: the whole comparison (about 290 live calls) used 1.56M input tokens, about $0.07. One request costs roughly 10k tokens (a skim of about 8.3k over 206 skills plus a select call of about 2k). The latency recorded during this run includes replay's pacing and rate-limit waits, so it does not reflect live latency; a single live call measured 0.8 to 2 s. With a new Vercel account's limit of 30 requests per window and two calls per request, skill selection alone can use that limit up in a busy session. Plan for a higher limit, or another provider, before running it live.
 
 ## Configure
 
