@@ -147,3 +147,11 @@ def test_openrouter_backend_wire_format(fake, monkeypatch):
     assert req["headers"]["authorization"] == "Bearer or-key"
     assert req["body"]["model"] == "typesafe/jev-1.13"
     assert "providerOptions" not in req["body"]  # Vercel-only field
+
+
+def test_typesafe_backend_honours_sdk_base_url_env(monkeypatch):
+    monkeypatch.setenv("TYPESAFE_BASE_URL", "https://gw.example/jev/")
+    assert ClientConfig(backend="typesafe").resolved()["base_url"] == "https://gw.example/jev"
+    # explicit config wins; other backends ignore the TypeSafe variable
+    assert ClientConfig(backend="typesafe", base_url="https://x").resolved()["base_url"] == "https://x"
+    assert ClientConfig(backend="vercel").resolved()["base_url"] == "https://ai-gateway.vercel.sh/typesafe"
