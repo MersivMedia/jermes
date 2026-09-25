@@ -83,6 +83,23 @@ DEFAULTS: Dict[str, Any] = {
             "min_confidence": 0.7,
             "max_stakes": 0.3,
         },
+        # Ingestion pipeline (explicit tool/CLI, not a hook). Jev only picks
+        # among candidates code found; it never writes values.
+        "ingest": {
+            "mode": "enforce",
+            "chunk_chars": 1500,        # I3 chunk size
+            "max_chunks": 60,           # chunks screened per document
+            "keep_threshold": 0.5,      # chunk kept as evidence when is_relevant >= this
+            "injection_threshold": 0.7, # chunk quarantined when contains_instruction >= this
+            "pick_min_p": 0.6,          # below this, a picked candidate goes to review
+            "none_min_p": 0.6,          # "not stated" accepted only above this
+            "flag_threshold": 0.7,      # I6: any verifier flag at or above this escalates
+            "class_min_confidence": 0.9,  # I8: below this, report the parent category
+            "max_candidates": 250,      # Choice limit is 255; keep room for "none"
+            "request_chars": 60000,     # state budget per Jev request (Jev takes ~32k tokens)
+            "cheap_model": None,        # I4/I7 generators via Hermes' own LLM access
+            "strong_model": None,
+        },
     },
 }
 

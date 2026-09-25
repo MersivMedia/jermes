@@ -4,6 +4,78 @@ Every measurement so far, newest first. The [README](../README.md) shows only th
 
 Setup for all runs: one real Hermes install (about 200 skills), Jev through Vercel AI Gateway, real past turns replayed from Hermes' `state.db`. Metric definitions are in the README under "Score the results".
 
+## September 25, 2026: data ingestion (SEC 10-K cover pages)
+
+Six fields per filing, with the correct values taken from SEC's structured data (submissions API and XBRL `dei` facts), not from the documents: state of incorporation, tax ID, fiscal year end, SEC file number, shares outstanding, public float. Each document is the first 25,000 characters of the 10-K. Baselines: Claude Sonnet 4.5 and Claude Haiku 4.5, each reading the whole document and filling every field in one call. Escalation model: Sonnet 4.5. Costs are list prices from real token counts.
+
+### Development set: 20 filings
+
+Used while building the finders and questions, so these runs aren't an unbiased test.
+
+| Run | Jev pipeline | Sonnet 4.5 | Haiku 4.5 | Jev pipeline cost | Sonnet cost |
+|---|---|---|---|---|---|
+| 4 fields | 80/80 | 80/80 | 80/80 | $0.026 | $0.366 |
+| 6 fields, first run | 116/120 (3 wrong, 1 review) | 119/120 | 119/120 | $0.102 | $0.378 |
+| 6 fields, after the fixes below | 120/120 | 120/120 | 120/120 | $0.047 | $0.379 |
+
+Two of the pipeline's three wrong values in the first 6-field run were bugs in the candidate finders, not wrong choices by Jev. The correct value was never offered:
+
+- "710,398,642." was cut to "710,398", because the trailing period was read as a decimal point.
+- "526.7 million" was offered as "526.7".
+- A bare "208,464,334,129" (no dollar sign) wasn't recognised as an amount.
+
+The third ("$80.7 billion" instead of the $81.1 billion float as of the second fiscal quarter) was an ambiguous question: the filing gives both. The baselines made the same mistake. Rewording the question to name the measurement date fixed it for all three.
+
+### Held-out set: 16 filings
+
+Never used during development. 2 of 96 values don't appear in their document text and are left out of scoring.
+
+| | Correct | Wrong | Cost | Strong-model input tokens |
+|---|---|---|---|---|
+| Jev pipeline | 94/94 | 0 | $0.027 | 5,319 |
+| Sonnet 4.5 | 94/94 | 0 | $0.298 | 91,737 |
+| Haiku 4.5 | 94/94 | 0 | $0.099 | 91,737 |
+
+Jev: 64 requests, 242k input tokens, $0.010. One field escalated (Cisco's public float, written "$ 294.5 billion"). Median 34 s per document.
+
+## September 25, 2026: token savings
+
+### Task-matched A/B through real Hermes
+
+Claude Opus 5.5. Each run gets a fresh isolated Hermes home, a scratch folder with the task's files, and an automatic answer check. Arms alternate order. Token counts come from Hermes' own session record.
+
+Six broad tasks, 3 runs per arm, `skill_suggest: advise`, `result_filter: enforce`:
+
+| Task | Off (mean per run) | On (mean per run) |
+|---|---|---|
+| Find the crash in a 90 KB log | $0.178 | $0.176 |
+| Look up a figure in a 70 KB spec | $0.198 | $0.193 |
+| Find the largest account in an 86 KB JSON file | $0.174 | $0.172 |
+| Convert a CSV to Excel | $0.191 | $0.207 |
+| Explain a monad (no tools) | $0.149 | $0.150 |
+| Fix a one-line bug (control) | $0.159 | $0.160 |
+| **Total, all 18 runs** | $3.146 | $3.178 (+1%) |
+
+All 36 runs passed. The filter almost never ran, because the agent searched the big files instead of reading them whole. On the CSV task, the agent loaded the suggested skill in one run and took 6 calls instead of 3.
+
+Two tasks that require reading a long file in full, 3 runs per arm:
+
+| Task | Off (per run) | On (per run) | Filter applied |
+|---|---|---|---|
+| Meeting transcript | $0.306, $0.307, $0.307 | $0.214, $0.194, $0.210 | 2, 1, 2 times |
+| Release notes | $0.252, $0.252, $0.277 | $0.210, $0.354, $0.250 | 1, 2, 0 times |
+| **Total** | $1.702 | $1.433 (−16%) | |
+
+All 12 runs passed. Tracing a release-notes run: the filter kept one of 111 sections, the one holding the answer, which Jev scored 0.82 against 0.28 for the next best. The agent then searched the file with `grep` twice before answering, rather than trusting the trimmed result.
+
+A first single-pair run was discarded: the child Hermes processes inherited this session's environment and ran in the wrong working directory. The harness now strips parent Hermes variables and pins the working directory (covered by a test).
+
+### Offline estimate over real sessions
+
+64 sessions with trustworthy counters, 1,066M prompt tokens, about $948 at list prices. The filter's real Jev decisions over 113 eligible big results: 64 filtered, 46 passed through, 3 Jev errors. Removed tokens, counting re-reads: 25.2M (2.4%), worth $11.61. Jev cost: $0.029. Three sessions account for 89% of the saving. Skill loads avoidable on the 40 labelled turns: 2 of 4, worth $0.06. Token counts assume 4 characters per token.
+
+Hermes' own price table has no entry for Claude Opus 5 or 5.5, and estimated about $1 for roughly $720 of usage on those models. The estimate uses Anthropic's published prices.
+
 ## September 25, 2026: hand labels
 
 40 real turns labelled by hand with the skills that should have loaded: 29 needed skills (2.9 on average), 11 needed none. Every change below was scored on the same 40 labels.

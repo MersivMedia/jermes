@@ -6,6 +6,9 @@
     replay   shadow-replay real past turns from Hermes' state.db (offline)
     label    hand-label real turns with the skills that should load (answer key)
     score    score Jev (and the agent) against your labels
+    savings  estimate reasoning-model tokens and $ Jermes would have saved (offline)
+    ab       run the same tasks with Jermes off and on; compare Hermes' own token counts
+    ingest   extract fields from documents (Jev picks, code copies); bench against one model
     stats    decisions per point and mode, cache hits, latency, tokens
     recent   last N logged decisions
 """
@@ -224,6 +227,99 @@ def cmd_score(args) -> int:
     return 0
 
 
+def cmd_savings(args) -> int:
+    from . import replay, savings
+
+    h = _labelling_harness()
+    fb = None
+    if args.price:
+        i, o, cr, cw = (float(x) for x in args.price.split(","))
+        fb = savings.Prices(i, o, cr, cw, "assumed (--price)")
+    rep = savings.run(Path(args.db) if args.db else replay.default_db(), h, fallback=fb)
+    savings.print_report(rep)
+    if args.json:
+        Path(args.json).write_text(json.dumps(rep, indent=2, default=str), encoding="utf-8")
+        print(f"\nfull report: {args.json}")
+    return 0
+
+
+def cmd_ab(args) -> int:
+    from . import ab
+    from .ab_tasks import TASKS
+
+    names = args.tasks.split(",") if args.tasks else [t.name for t in TASKS]
+    if args.list:
+        for t in TASKS:
+            print(f"  {t.name:<14} {t.exercises}")
+        return 0
+    out = Path(args.json) if args.json else None
+    print(f"A/B: {len(names)} task(s) x 2 arms x {args.repeats} repeat(s) = {len(names) * 2 * args.repeats} agent runs")
+    try:
+        runs = ab.run_ab(names, args.repeats, points={"skill": args.skill_mode, "filt": args.filter_mode},
+                         timeout=args.timeout, out_path=out)
+    except RuntimeError as exc:
+        print(f"FAILED preflight: {exc}")
+        return 1
+    s = ab.summarize(runs)
+    ab.print_summary(s)
+    if out:
+        out.with_suffix(".summary.json").write_text(json.dumps(s, indent=2))
+    return 0
+
+
+def cmd_ingest(args) -> int:
+    from .ingest import bench
+
+    eng = _batch_engine()
+    if args.bench:
+        docs, truth = bench.load_bench(Path(args.bench))
+        if args.limit:
+            keep = list(truth)[: args.limit]
+            docs, truth = {k: docs[k] for k in keep}, {k: truth[k] for k in keep}
+        rep = bench.benchmark(eng, docs, truth, strong_model=args.strong, cheap_model=args.cheap,
+                              arms=args.arms.split(",") if args.arms else None)
+        bench.print_report(rep)
+        if args.json:
+            Path(args.json).write_text(json.dumps(rep, indent=1, default=str))
+        return 0
+    import yaml
+
+    from .ingest import Pipeline, load_schema
+    from .ingest.llm import ChatModel, extractor
+
+    if not args.schema or not args.files:
+        print("usage: jermes ingest --schema schema.yaml FILE [FILE ...]   (or --bench DIR)")
+        return 2
+    schema = load_schema(yaml.safe_load(Path(args.schema).read_text()))
+    pipe = Pipeline(eng, schema, strong=extractor(ChatModel(args.strong)) if args.strong else None)
+    rows = []
+    for f in args.files:
+        rec = pipe.run(Path(f).name, Path(f).read_text(errors="replace"))
+        rows.append(rec.to_json())
+        vals = ", ".join(f"{k}={v!r}" for k, v in rec.values().items())
+        print(f"{Path(f).name}: {rec.disposition}  {vals}" + (f"  [{'; '.join(rec.reasons)}]" if rec.reasons else ""))
+    if args.json:
+        Path(args.json).write_text(json.dumps(rows, indent=1, default=str))
+    return 0
+
+
+def _batch_engine(interval_s: float = 2.1):
+    """Engine for offline batch work: ingest point on, patient paced client
+    (same settings as replay; the Vercel gateway allows ~30 requests/window)."""
+    from .config import load_config
+    from .engine import Engine
+
+    cfg = load_config()
+    if cfg["points"]["ingest"].get("mode") == "off":
+        cfg["points"]["ingest"]["mode"] = "enforce"
+    eng = Engine(cfg)
+    c = eng.client.config
+    c.deadline_s = max(c.deadline_s, 90.0)
+    c.max_retries = max(c.max_retries, 6)
+    c.min_interval_s = max(c.min_interval_s, interval_s)
+    return eng
+
+
 class register_cli:  # namespace used by the plugin entry point
     @staticmethod
     def setup(parser: argparse.ArgumentParser) -> None:
@@ -251,6 +347,29 @@ class register_cli:  # namespace used by the plugin entry point
         p.add_argument("--with-skill", action="store_true", help="only turns where the agent loaded a skill")
         p.add_argument("--export", default=None, help="write a CSV to fill in (e.g. in Google Sheets) instead")
         p.add_argument("--import", dest="import_", default=None, help="read labels back from a filled-in CSV, or gdrive:<sheet-id> for a Google Sheet")
+        p = sub.add_parser("savings", help="estimate tokens and $ Jermes would have saved on past sessions")
+        p.add_argument("--db", default=None, help="path to state.db (default: $HERMES_HOME/state.db)")
+        p.add_argument("--price", default=None,
+                       help="fallback $/M for models Hermes has no price for: input,output,cache_read,cache_write")
+        p.add_argument("--json", default=None, help="write the full report as JSON")
+        p = sub.add_parser("ab", help="task-matched A/B: same tasks with Jermes off and on (spends model tokens)")
+        p.add_argument("--tasks", default=None, help="comma-separated task names (default: all; see --list)")
+        p.add_argument("--list", action="store_true", help="list the built-in tasks")
+        p.add_argument("--repeats", type=int, default=1)
+        p.add_argument("--skill-mode", default="advise", choices=["shadow", "advise", "enforce"])
+        p.add_argument("--filter-mode", default="enforce", choices=["shadow", "advise", "enforce"])
+        p.add_argument("--timeout", type=int, default=900, help="seconds per agent run")
+        p.add_argument("--json", default=None, help="write every run (and a .summary.json) here")
+        p = sub.add_parser("ingest", help="extract fields from documents; --bench compares against one model")
+        p.add_argument("files", nargs="*")
+        p.add_argument("--schema", default=None, help="YAML schema: name, scope, fields[name, question, kind]")
+        p.add_argument("--bench", default=None, help="benchmark dir with truth.json + <doc>.txt")
+        p.add_argument("--limit", type=int, default=0)
+        p.add_argument("--arms", default=None, help="jev,strong,cheap (default: all configured)")
+        p.add_argument("--strong", default="anthropic:claude-sonnet-4-5",
+                       help="escalation / baseline model: anthropic:<id> (ANTHROPIC_API_KEY) or a gateway id")
+        p.add_argument("--cheap", default=None, help="cheap baseline model, e.g. anthropic:claude-haiku-4-5")
+        p.add_argument("--json", default=None)
         p = sub.add_parser("score", help="score Jev and the agent against your labels")
         p.add_argument("--json", default=None, help="write the full report as JSON")
 
@@ -258,7 +377,7 @@ class register_cli:  # namespace used by the plugin entry point
     def handle(args: Any) -> int:
         cmd = getattr(args, "jermes_cmd", None) or "status"
         return {"status": cmd_status, "stats": cmd_stats, "recent": cmd_recent, "check": cmd_check,
-                "rank": cmd_rank, "replay": cmd_replay, "label": cmd_label, "score": cmd_score}[cmd](args)
+                "rank": cmd_rank, "replay": cmd_replay, "label": cmd_label, "score": cmd_score, "savings": cmd_savings, "ab": cmd_ab, "ingest": cmd_ingest}[cmd](args)
 
 
 def main(argv: Optional[List[str]] = None) -> int:

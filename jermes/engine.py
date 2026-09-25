@@ -51,6 +51,7 @@ class Decision:
     error: Optional[str] = None
     latency_ms: float = 0.0
     log_id: int = 0
+    input_tokens: int = 0  # Jev input tokens billed for this decision (0 on a cache hit)
 
     @property
     def ok(self) -> bool:
@@ -214,6 +215,7 @@ class Engine:
             cached=cached,
             error=error,
             latency_ms=latency,
+            input_tokens=0 if cached else int(tokens or 0),
         )
         try:
             detail = dict(log_detail or {})

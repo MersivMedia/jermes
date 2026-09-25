@@ -225,24 +225,12 @@ class Harness:
 
     def _filter_result(self, sid: str, tool_name: str, result: str, status: str) -> Optional[str]:
         point = "result_filter"
-        cfg = self.engine.point_config(point)
-        if tool_name not in set(cfg.get("tools") or []) or not self.engine.enabled(point):
+        if not self.engine.enabled(point):
             return None
-        if status and status not in ("ok", "success"):
+        prepared = self.prepare_filter(tool_name, result, status, self.history.request(sid))
+        if prepared is None:
             return None
-        if not (int(cfg.get("min_chars", 6000)) <= len(result) <= int(cfg.get("max_chars", 100000))):
-            return None
-        text, wrapper, key = result_filter.extract_text(result)
-        if not text or len(text) < int(cfg.get("min_chars", 6000)) * 0.8:
-            return None
-        chunks = result_filter.chunk(text, int(cfg.get("max_chunks", 120)))
-        if len(chunks) < 3:
-            return None
-        task = self.history.request(sid)
-        if not task:
-            return None
-        state, qs = result_filter.build(task, tool_name, chunks)
-        policy = result_filter.make_policy(cfg, len(chunks))
+        chunks, wrapper, key, text, state, qs, policy = prepared
         kw = {"session_id": sid, "spec_version": result_filter.SPEC_VERSION,
               "log_detail": {"tool": tool_name, "chars": len(result)}}
         if self._shadow(point, state, qs, policy, **kw):
@@ -252,6 +240,30 @@ class Harness:
             return None
         self.engine.mark_applied(d)
         return result_filter.render(chunks, d.detail["kept_idx"], wrapper, key, len(text))
+
+    def prepare_filter(self, tool_name: str, result: str, status: str, task: str):
+        """Eligibility checks and question building for one tool result.
+
+        Returns ``None`` when the result is not eligible (wrong tool, error,
+        too small or too large, too few sections, no task), otherwise the
+        pieces needed to decide and render. Shared by the live hook and the
+        offline savings estimate so both apply exactly the same rules.
+        """
+        cfg = self.engine.point_config("result_filter")
+        if tool_name not in set(cfg.get("tools") or []):
+            return None
+        if status and status not in ("ok", "success"):
+            return None
+        if not (int(cfg.get("min_chars", 6000)) <= len(result) <= int(cfg.get("max_chars", 100000))):
+            return None
+        text, wrapper, key = result_filter.extract_text(result)
+        if not text or len(text) < int(cfg.get("min_chars", 6000)) * 0.8:
+            return None
+        chunks = result_filter.chunk(text, int(cfg.get("max_chunks", 120)))
+        if len(chunks) < 3 or not task:
+            return None
+        state, qs = result_filter.build(task, tool_name, chunks)
+        return chunks, wrapper, key, text, state, qs, result_filter.make_policy(cfg, len(chunks))
 
     def _loop_note(self, sid: str, tool_name: str, args: Dict[str, Any], result: str, status: str) -> Optional[str]:
         point = "loop_guard"
