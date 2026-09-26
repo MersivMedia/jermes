@@ -52,6 +52,29 @@ _shared = None
 _shared_lock = threading.Lock()
 
 
+# Trimmer state per Hermes session id, at module level: the gateway replaces
+# agent instances (idle eviction, memory pressure, restarts of the agent
+# cache) and each gets a fresh deep copy of the engine, but the clock and the
+# stubs belong to the conversation. Bounded; oldest sessions are dropped.
+_trimmers: "Dict[str, Trimmer]" = {}
+_trimmers_lock = threading.Lock()
+_MAX_SESSIONS = 256
+
+
+def trimmer_for(session_id: str) -> "Trimmer":
+    with _trimmers_lock:
+        t = _trimmers.pop(session_id, None) or Trimmer(session_id)
+        _trimmers[session_id] = t              # re-insert: most recent last
+        while len(_trimmers) > _MAX_SESSIONS:
+            _trimmers.pop(next(iter(_trimmers)))
+        return t
+
+
+def forget_session(session_id: str) -> None:
+    with _trimmers_lock:
+        _trimmers.pop(session_id, None)
+
+
 def set_shared_engine(engine: Any) -> None:
     global _shared
     _shared = engine
@@ -140,7 +163,8 @@ def stub_args(args: str, path: str, keep_chars: int = 200) -> Optional[str]:
 class Trimmer:
     """Hermes-independent trimming logic. One per agent (session)."""
 
-    def __init__(self) -> None:
+    def __init__(self, session_id: str = "") -> None:
+        self.session_id = session_id
         self.stubs: Dict[str, str] = {}      # "<tool_call_id>:r" / ":a" -> replacement
         self.last_call: Optional[float] = None
         self.stats = {"cold_turns": 0, "decisions": 0, "trimmed_items": 0, "trimmed_chars": 0, "errors": 0}
@@ -166,7 +190,7 @@ class Trimmer:
         if cold and eng.client.available():
             self.stats["cold_turns"] += 1
             if mode == "shadow":
-                threading.Thread(target=self._decide, args=(messages, cfg, True), daemon=True).start()
+                threading.Thread(target=self._decide, args=(list(messages), cfg, True), daemon=True).start()
             else:
                 self._decide(messages, cfg, False)
         if mode != "enforce" or not self.stubs:
@@ -274,13 +298,18 @@ class Trimmer:
             try:
                 from .config import POLICY_VERSION
 
-                eng.store.log(session_id="", point=POINT, mode="shadow" if shadow else "enforce",
+                eng.store.log(session_id=self.session_id, point=POINT, mode="shadow" if shadow else "enforce",
                               spec_version=SPEC_VERSION, policy_version=POLICY_VERSION, model=eng.client.model,
                               state_hash="", answers_json="{}", action="would_trim" if shadow else "trim",
                               applied=0 if shadow else 1, cached=0, latency_ms=0.0, input_tokens=0, error=None,
                               detail_json=json.dumps({"candidates": len(cands), "dropped": len(drop),
                                                       "chars_removed": removed,
-                                                      "chars_considered": sum(len(c["text"]) for c in cands)}))
+                                                      "chars_considered": sum(len(c["text"]) for c in cands),
+                                                      # what was (or would be) dropped, so a later
+                                                      # report can check whether the agent needed it again
+                                                      "items": [{"key": c["key"], "tool": c["tool"],
+                                                                 "call": _short_args(c["args"], 200),
+                                                                 "chars": len(c["text"])} for c in drop]}))
             except Exception:
                 logger.debug("jermes context_trim log failed", exc_info=True)
             logger.info("jermes context_trim: %d of %d old items %s (%d chars)", len(drop), len(cands),
@@ -365,11 +394,20 @@ def build_engine(hermes_config: Optional[Dict[str, Any]] = None):
             return "jermes"
 
         def _trimmer(self) -> Trimmer:
-            t = self.__dict__.get("_jermes_trimmer")
+            sid = self.__dict__.get("_jermes_session_id") or getattr(self, "_session_id", "") or ""
+            if sid:
+                return trimmer_for(sid)
+            t = self.__dict__.get("_jermes_trimmer")   # no session id (tests, one-off agents)
             if t is None:
                 t = Trimmer()
                 self.__dict__["_jermes_trimmer"] = t
             return t
+
+        def on_session_start(self, session_id: str, **kwargs) -> None:
+            self.__dict__["_jermes_session_id"] = session_id or ""
+            parent = getattr(super(), "on_session_start", None)
+            if callable(parent):
+                parent(session_id, **kwargs)
 
         def select_context(self, request_messages, *, conversation_messages=None, incoming_message=None,
                            budget_tokens=0):
@@ -380,20 +418,48 @@ def build_engine(hermes_config: Optional[Dict[str, Any]] = None):
                 return None
 
         def on_session_reset(self) -> None:
+            sid = self.__dict__.get("_jermes_session_id") or getattr(self, "_session_id", "") or ""
+            if sid:
+                forget_session(sid)
             self.__dict__.pop("_jermes_trimmer", None)
             parent = getattr(super(), "on_session_reset", None)
             if callable(parent):
                 parent()
 
     comp = (hermes_config or {}).get("compression") or {}
+
+    def _int(key: str, default: int) -> int:
+        v = comp.get(key, default)
+        try:
+            return default if isinstance(v, bool) else int(v)
+        except (TypeError, ValueError):
+            return default
+
+    # Mirror the settings Hermes passes its built-in compressor, so choosing
+    # this engine changes nothing about compaction itself.
+    raw_mt = comp.get("model_thresholds") or {}
+    cap = comp.get("threshold_tokens")
+    try:
+        cap = int(cap) if cap is not None and int(cap) > 0 else None
+    except (TypeError, ValueError):
+        cap = None
     wanted = {
         "model": "",
         "threshold_percent": float(comp.get("threshold", 0.50)),
-        "protect_first_n": int(comp.get("protect_first_n", 3)),
-        "protect_last_n": int(comp.get("protect_last_n", 20)),
+        "protect_first_n": max(0, _int("protect_first_n", 3)),
+        "protect_last_n": _int("protect_last_n", 20),
         "summary_target_ratio": float(comp.get("target_ratio", 0.20)),
-        "abort_on_summary_failure": bool(comp.get("abort_on_summary_failure", False)),
-        "tail_mode": str(comp.get("tail_mode", "lean")),
+        "summary_model_override": None,
+        "abort_on_summary_failure": str(comp.get("abort_on_summary_failure", False)).lower() in {"true", "1", "yes"},
+        "tail_mode": str(comp.get("tail_mode", "lean")).strip().lower(),
+        "min_tail_user_messages": max(1, _int("min_tail_user_messages", 1)),
+        "proactive_prune_tokens": max(0, _int("proactive_prune_tokens", 0)),
+        "proactive_prune_min_result_chars": _int("proactive_prune_min_result_chars", 8000),
+        "proactive_prune_min_reclaim_tokens": max(0, _int("proactive_prune_min_reclaim_tokens", 4096)),
+        "model_thresholds": {str(k): float(v) for k, v in raw_mt.items()
+                             if isinstance(v, (int, float)) and not isinstance(v, bool)}
+                            if isinstance(raw_mt, dict) else {},
+        "threshold_tokens_cap": cap,
         "quiet_mode": True,
     }
     params = inspect.signature(ContextCompressor.__init__).parameters

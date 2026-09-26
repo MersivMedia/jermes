@@ -158,3 +158,51 @@ def test_trimmed_item_comes_back_when_a_later_request_needs_it(trim, fake):
     later = conv("why did the build warn earlier?")
     out = trim.apply(later, now=2000.0)                       # cold again
     assert out is None or next(m for m in out if m.get("tool_call_id") == "c1")["content"] == BIG
+
+
+def test_state_survives_a_new_agent_instance_for_the_same_session(make_engine, fake, monkeypatch, tmp_path):
+    # The gateway can evict an agent and build a new one (fresh deep copy of
+    # the engine) mid-conversation. The clock and stubs must carry over, or
+    # the new agent would treat a warm cache as cold and change the prefix.
+    pytest.importorskip("agent.context_compressor")
+    import copy
+
+    ce.set_shared_engine(make_engine(context_trim="enforce"))
+    monkeypatch.setattr("jermes.store.data_dir", lambda: tmp_path)
+    say(fake, 0.1)
+    proto = ce.build_engine({})
+    a = copy.deepcopy(proto)
+    a.on_session_start("sess-1")
+    first = a._trimmer().apply(conv(), now=1000.0)
+    b = copy.deepcopy(proto)                      # replacement agent, same session
+    b.on_session_start("sess-1")
+    n = len(fake.requests)
+    again = b._trimmer().apply(conv(), now=1060.0)  # 60 s later: still warm
+    assert len(fake.requests) == n and json.dumps(again) == json.dumps(first)
+    c = copy.deepcopy(proto)                      # a different session starts fresh
+    c.on_session_start("sess-2")
+    assert c._trimmer() is not b._trimmer()
+    ce.set_shared_engine(None)
+
+
+def test_shadow_logs_which_items_would_be_dropped(make_engine, fake, monkeypatch, tmp_path):
+    import time as _t
+
+    eng = make_engine(context_trim="shadow")
+    ce.set_shared_engine(eng)
+    monkeypatch.setattr("jermes.store.data_dir", lambda: tmp_path)
+    say(fake, 0.1)
+    t = ce.trimmer_for("sess-log")
+    assert t.apply(conv(), now=1000.0) is None
+    for _ in range(50):                                   # shadow decides in a background thread
+        rows = eng.store.recent(20) if hasattr(eng.store, "recent") else []
+        if any(r.get("point") == "context_trim" for r in rows):
+            break
+        _t.sleep(0.05)
+    row = next(r for r in rows if r.get("point") == "context_trim")
+    detail = json.loads(row["detail_json"])
+    assert row["session_id"] == "sess-log" and row["action"] == "would_trim"
+    assert {i["key"] for i in detail["items"]} == {"c1:r", "c2:a"}
+    assert detail["items"][0]["call"]
+    ce.forget_session("sess-log")
+    ce.set_shared_engine(None)
