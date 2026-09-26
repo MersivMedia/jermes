@@ -9,6 +9,9 @@
     savings  estimate reasoning-model tokens and $ Jermes would have saved (offline)
     ab       run the same tasks with Jermes off and on; compare Hermes' own token counts
     ingest   extract fields from documents (Jev picks, code copies); bench against one model
+    riskbench  score the risk gate on labelled cases and on real past tool calls
+    loopbench  score the loop guard's repeat-failure check on real past sessions
+    costsim  price your past sessions under context trimming (offline, no Jev calls)
     stats    decisions per point and mode, cache hits, latency, tokens
     recent   last N logged decisions
 """
@@ -19,7 +22,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from .client import ClientConfig, JevClient, JevError
 from .config import config_path, load_config
@@ -170,7 +173,7 @@ def cmd_label(args) -> int:
     known = [s.name for s in h.roster()]
     turns = list(replay.iter_turns(replay.default_db(), limit=args.limit, only_with_skill=args.with_skill))
     if args.export:
-        n = labels.export_sheet(turns, lambda t: _jev_list(h, t), Path(args.export))
+        n = labels.export_sheet(turns, lambda t: _jev_list(h, t), Path(args.export), blind=args.blind)
         print(f"wrote {n} turns to {args.export}")
         print(labels.SHEET_HELP)
         print(f"then: hermes jermes label --import {args.export}")
@@ -255,7 +258,8 @@ def cmd_ab(args) -> int:
     out = Path(args.json) if args.json else None
     print(f"A/B: {len(names)} task(s) x 2 arms x {args.repeats} repeat(s) = {len(names) * 2 * args.repeats} agent runs")
     try:
-        runs = ab.run_ab(names, args.repeats, points={"skill": args.skill_mode, "filt": args.filter_mode},
+        runs = ab.run_ab(names, args.repeats, points={"skill": args.skill_mode, "filt": args.filter_mode,
+                                                      "trim": args.trim_mode},
                          timeout=args.timeout, out_path=out)
     except RuntimeError as exc:
         print(f"FAILED preflight: {exc}")
@@ -303,6 +307,90 @@ def cmd_ingest(args) -> int:
     return 0
 
 
+def cmd_riskbench(args) -> int:
+    from . import riskbench
+    from .replay import default_db
+
+    eng = _batch_engine(interval_s=args.interval)
+    eng.config["points"]["risk_gate"]["mode"] = "enforce"
+    out: Dict[str, Any] = {}
+    if not args.real_only:
+        print("labelled cases:")
+        s = riskbench.score_cases(eng)
+        out["cases"] = s
+        rx = s["regex"]
+        print(f"\n  Jev: exact {_pct(s['exact'])}, dangerous blocked {_pct(s['dangerous_blocked'])}, "
+              f"dangerous stopped (block or review) {_pct(s['dangerous_stopped'])}, "
+              f"benign allowed {_pct(s['benign_allowed'])}, benign blocked {_pct(s['benign_blocked'])}"
+              f"  ({s['errors']} errors)")
+        print(f"  Hermes regex (shell cases only, n={rx['shell_cases']}): dangerous flagged "
+              f"{_pct(rx['dangerous_flagged'])}, needs-human flagged {_pct(rx['needs_human_flagged'])}, "
+              f"benign flagged {_pct(rx['benign_flagged'])}")
+    if args.real:
+        calls = riskbench.real_calls(Path(args.db) if args.db else default_db(), args.real)
+        print(f"\n{len(calls)} real tool calls (all were run with the user's approval):")
+        r = riskbench.score_real(eng, calls)
+        out["real"] = r
+        print(f"  actions {r['actions']}; block rate {_pct(r['block_rate'])}, review rate {_pct(r['review_rate'])}; "
+              f"Hermes regex flagged {_pct(r['hermes_regex_flag_rate'])} of shell calls; "
+              f"latency p50 {r['latency_ms_p50']} ms, p90 {r['latency_ms_p90']} ms")
+        for f in r["flagged"][:15]:
+            print(f"    {f['action']:<6} {f['tool']:<12} {str(f['reason'])[:40]:<42} {f['args'][:90]}")
+    if args.json:
+        Path(args.json).write_text(json.dumps(out, indent=1, default=str))
+    return 0
+
+
+def cmd_loopbench(args) -> int:
+    from . import loopbench
+    from .replay import default_db
+
+    eng = _batch_engine(interval_s=args.interval)
+    eng.config["points"]["loop_guard"]["mode"] = "enforce"
+    r = loopbench.score(eng, Path(args.db) if args.db else default_db(), n_positive=args.positives,
+                        n_negative=args.negatives)
+    for d in r["disagreements"][:20]:
+        print(f"    {d['type']:<9} p={d['p']:<5} {d['tool']:<12} {d['latest'][:100]}")
+    if args.json:
+        Path(args.json).write_text(json.dumps(r, indent=1, default=str))
+    return 0
+
+
+def cmd_costsim(args) -> int:
+    from . import costsim
+    from .replay import default_db
+
+    ss = costsim.sessions(Path(args.db) if args.db else default_db(), min_calls=args.min_calls)
+    if not ss:
+        print("no sessions with enough stored history to rebuild")
+        return 1
+    policies = [costsim.Policy("as recorded"),
+                costsim.Policy(f"trim, Jev keeps {args.keep:.0%}", compact=True, keep_fraction=args.keep,
+                               keep_turns=args.keep_turns, ttl=args.ttl),
+                costsim.Policy("trim everything old", compact=True, keep_fraction=0.0, keep_turns=args.keep_turns,
+                               ttl=args.ttl)]
+    tot = {p.name: 0.0 for p in policies}
+    print(f"{len(ss)} sessions rebuilt call by call (cache TTL {args.ttl:.0f} s, last {args.keep_turns} turns protected)")
+    for s in ss:
+        r = {p.name: costsim.simulate(s, p)["usd"] for p in policies}
+        for k, v in r.items():
+            tot[k] += v
+        if args.verbose:
+            b = r["as recorded"]
+            print(f"  {s.sid[:24]:<24} {len(s.calls):>5} calls  ${b:8.2f}  " +
+                  "  ".join(f"{(v - b) / b:+.0%}" for k, v in r.items() if k != "as recorded"))
+    base = tot["as recorded"]
+    for k, v in tot.items():
+        print(f"  {k:<26} ${v:9.2f}" + ("" if k == "as recorded" else f"  ({(v - base) / base:+.1%})"))
+    print("Estimates from rebuilt prompts and list prices; they don't include any rework if the agent")
+    print("needs a trimmed item back. The A/B (`hermes jermes ab`) measures that.")
+    return 0
+
+
+def _pct(x) -> str:
+    return "-" if x is None else f"{x * 100:.0f}%"
+
+
 def _batch_engine(interval_s: float = 2.1):
     """Engine for offline batch work: ingest point on, patient paced client
     (same settings as replay; the Vercel gateway allows ~30 requests/window)."""
@@ -346,6 +434,7 @@ class register_cli:  # namespace used by the plugin entry point
         p.add_argument("-n", "--limit", type=int, default=40, help="recent real turns to offer")
         p.add_argument("--with-skill", action="store_true", help="only turns where the agent loaded a skill")
         p.add_argument("--export", default=None, help="write a CSV to fill in (e.g. in Google Sheets) instead")
+        p.add_argument("--blind", action="store_true", help="with --export: hide Jev's and the agent's answers")
         p.add_argument("--import", dest="import_", default=None, help="read labels back from a filled-in CSV, or gdrive:<sheet-id> for a Google Sheet")
         p = sub.add_parser("savings", help="estimate tokens and $ Jermes would have saved on past sessions")
         p.add_argument("--db", default=None, help="path to state.db (default: $HERMES_HOME/state.db)")
@@ -356,8 +445,10 @@ class register_cli:  # namespace used by the plugin entry point
         p.add_argument("--tasks", default=None, help="comma-separated task names (default: all; see --list)")
         p.add_argument("--list", action="store_true", help="list the built-in tasks")
         p.add_argument("--repeats", type=int, default=1)
-        p.add_argument("--skill-mode", default="advise", choices=["shadow", "advise", "enforce"])
-        p.add_argument("--filter-mode", default="enforce", choices=["shadow", "advise", "enforce"])
+        p.add_argument("--skill-mode", default="advise", choices=["off", "shadow", "advise", "enforce"])
+        p.add_argument("--filter-mode", default="enforce", choices=["off", "shadow", "advise", "enforce"])
+        p.add_argument("--trim-mode", default="off", choices=["off", "shadow", "enforce"],
+                       help="context trimming (also switches Hermes to the jermes context engine)")
         p.add_argument("--timeout", type=int, default=900, help="seconds per agent run")
         p.add_argument("--json", default=None, help="write every run (and a .summary.json) here")
         p = sub.add_parser("ingest", help="extract fields from documents; --bench compares against one model")
@@ -370,6 +461,25 @@ class register_cli:  # namespace used by the plugin entry point
                        help="escalation / baseline model: anthropic:<id> (ANTHROPIC_API_KEY) or a gateway id")
         p.add_argument("--cheap", default=None, help="cheap baseline model, e.g. anthropic:claude-haiku-4-5")
         p.add_argument("--json", default=None)
+        p = sub.add_parser("riskbench", help="score the risk gate on labelled cases and real past tool calls")
+        p.add_argument("--real", type=int, default=0, help="also score N real tool calls from state.db")
+        p.add_argument("--real-only", action="store_true")
+        p.add_argument("--db", default=None)
+        p.add_argument("--interval", type=float, default=2.1)
+        p.add_argument("--json", default=None)
+        p = sub.add_parser("loopbench", help="score the loop guard on real past sessions")
+        p.add_argument("--positives", type=int, default=40)
+        p.add_argument("--negatives", type=int, default=80)
+        p.add_argument("--db", default=None)
+        p.add_argument("--interval", type=float, default=2.1)
+        p.add_argument("--json", default=None)
+        p = sub.add_parser("costsim", help="price past sessions under context trimming (offline)")
+        p.add_argument("--db", default=None)
+        p.add_argument("--keep", type=float, default=0.3, help="fraction of old items assumed kept by Jev")
+        p.add_argument("--keep-turns", type=int, default=2)
+        p.add_argument("--ttl", type=float, default=300.0)
+        p.add_argument("--min-calls", type=int, default=50)
+        p.add_argument("-v", "--verbose", action="store_true")
         p = sub.add_parser("score", help="score Jev and the agent against your labels")
         p.add_argument("--json", default=None, help="write the full report as JSON")
 
@@ -377,7 +487,7 @@ class register_cli:  # namespace used by the plugin entry point
     def handle(args: Any) -> int:
         cmd = getattr(args, "jermes_cmd", None) or "status"
         return {"status": cmd_status, "stats": cmd_stats, "recent": cmd_recent, "check": cmd_check,
-                "rank": cmd_rank, "replay": cmd_replay, "label": cmd_label, "score": cmd_score, "savings": cmd_savings, "ab": cmd_ab, "ingest": cmd_ingest}[cmd](args)
+                "rank": cmd_rank, "replay": cmd_replay, "label": cmd_label, "score": cmd_score, "savings": cmd_savings, "ab": cmd_ab, "ingest": cmd_ingest, "riskbench": cmd_riskbench, "loopbench": cmd_loopbench, "costsim": cmd_costsim}[cmd](args)
 
 
 def main(argv: Optional[List[str]] = None) -> int:

@@ -1,6 +1,7 @@
 """Harness behaviour per mode: shadow changes nothing, enforce acts, failures fail open."""
 
 import json
+import re
 import time
 
 import pytest
@@ -120,7 +121,10 @@ def test_result_filter_enforce_trims(make_engine, fake):
     out = h.on_transform_tool_result(tool_name="web_extract", args={}, result=original, session_id="s", status="ok")
     assert out is not None and len(out) < len(original) / 2
     content = json.loads(out)["content"]
-    assert "RELEVANT fact 0" in content and "boilerplate 1." not in content and "omitted by jermes" in content
+    assert "RELEVANT fact 0" in content and "boilerplate 1." not in content and "judged not relevant" in content
+    # the full output is saved where the note says, so the model can check a detail
+    saved = re.search(r"Full output: (\S+?\.txt)", content).group(1)
+    assert "boilerplate 1." in open(saved).read()
 
 
 def test_result_filter_shadow_unchanged(make_engine, fake):
@@ -154,12 +158,15 @@ def test_loop_guard_advise_appends_note(make_engine, fake):
 
 def test_model_router_enforce_swaps_model_for_turn(make_engine, fake):
     eng = make_engine(model_router="enforce", skill_suggest="off")
-    eng.config["points"]["model_router"]["cheap_model"] = "cheap-model"
+    eng.config["points"]["model_router"]["cheap_model"] = "claude-haiku-4-5"
     h = Harness(eng)
+    small = [{"role": "user", "content": "hi"}]
+    h.llm_request_middleware(request={"model": "claude-opus-5", "messages": small}, session_id="s")  # a prior turn
+    h._last_llm["s"] -= 1000                                            # ...long enough ago that the cache is cold
     h.on_pre_llm_call(session_id="s", user_message="what time is it in Tokyo?")
-    out = h.llm_request_middleware(request={"model": "big-model", "messages": []}, session_id="s")
-    assert out["request"]["model"] == "cheap-model"
-    assert h.llm_request_middleware(request={"model": "big-model"}, session_id="other") is None
+    out = h.llm_request_middleware(request={"model": "claude-opus-5", "messages": small}, session_id="s")
+    assert out["request"]["model"] == "claude-haiku-4-5"
+    assert h.llm_request_middleware(request={"model": "claude-opus-5"}, session_id="other") is None
 
 
 def test_model_router_without_cheap_model_is_inert(make_engine, fake):
@@ -230,3 +237,29 @@ def test_hooks_never_raise_on_garbage(make_engine, hook):
     h = Harness(make_engine(risk_gate="enforce", result_filter="enforce", loop_guard="enforce",
                             skill_suggest="enforce", model_router="enforce"))
     getattr(h, hook)(tool_name=None, args=None, result=None, session_id=None, user_message=None)
+
+
+def test_result_filter_skips_explicit_line_ranges(make_engine, fake):
+    _relevance(fake)
+    h = Harness(make_engine(result_filter="enforce", loop_guard="off"))
+    h.history.set_request("s", "how does token rotation work?")
+    out = h.on_transform_tool_result(tool_name="read_file", args={"path": "doc.md", "offset": 200, "limit": 300},
+                                     result=_big_result(), session_id="s", status="ok")
+    assert out is None and not fake.requests
+
+
+def test_router_guard_blocks_switch_when_context_too_big(make_engine, fake):
+    fake.on(lambda qid, q, s: {"type": "score", "score": 0.0, "probabilities": {"0": 1.0, "1": 0.0, "2": 0.0},
+                               "confidence": 0.95} if qid == "difficulty" else None)
+    eng = make_engine(model_router="enforce", skill_suggest="off", risk_gate="off")
+    eng.config["points"]["model_router"]["cheap_model"] = "claude-haiku-4-5"
+    h = Harness(eng)
+    big = [{"role": "user", "content": "x" * 1_000_000}]                      # ~250k tokens
+    h.llm_request_middleware(request={"model": "claude-opus-5-5", "messages": big}, session_id="s")
+    h.on_pre_llm_call(session_id="s", user_message="what time is it?")
+    assert h.llm_request_middleware(request={"model": "claude-opus-5-5", "messages": big}, session_id="s") is None
+    # First turn of a session: the current model is unknown, so no switch.
+    h2 = Harness(eng)
+    h2.on_pre_llm_call(session_id="t", user_message="what time is it?")
+    assert h2.llm_request_middleware(request={"model": "claude-opus-5-5", "messages": [{"role": "user", "content": "hi"}]},
+                                     session_id="t") is None

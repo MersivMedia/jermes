@@ -4,6 +4,104 @@ Every measurement so far, newest first. The [README](../README.md) shows only th
 
 Setup for all runs: one real Hermes install (about 200 skills), Jev through Vercel AI Gateway, real past turns replayed from Hermes' `state.db`. Metric definitions are in the README under "Score the results".
 
+## September 26, 2026: context trimming, routing ceiling, risk gate and loop guard
+
+### Context trimming: first live pair
+
+New A/B task `session`: four turns in one Hermes session, with a 5.5-minute pause before each follow-up so the provider's prompt cache really expires. Both arms pause.
+
+1. Read three large files in full (a log, a spec, a JSON user list) and summarise each.
+2. Fix an unrelated failing test.
+3. Name the component that crashed, from the log read in turn 1.
+4. Give one limit from the spec read in turn 1.
+
+"On" arm: the Jermes context engine with `context_trim` in enforce, and every other point off, so the difference comes from trimming alone. Model: Claude Opus 5.5. One run per arm.
+
+| Arm | Correct | Cache reads | Cache writes | Cost |
+|---|---|---|---|---|
+| Off | yes | 1,071k | 786k | $4.21 |
+| On | yes | 981k | 522k | **$2.86** |
+
+Change: prompt tokens −19%, cost **−32%** (Jev's share: $0.001). The saving came mostly from cache writes: after each pause, the whole prompt is written to the cache again, and the trimmed prompt was about 290k characters smaller.
+
+At the turn-3 pause, Jev marked all six old items (293k characters: three file reads plus follow-up reads of the same files) as no longer needed. The agent still answered turns 3 and 4 correctly from its own turn-1 summary, without re-reading. So this pair doesn't test the harder case, where a trimmed item has to come back.
+
+Limits: one pair, and the task costs about $7 per pair.
+
+### Cost simulation over real sessions (`hermes jermes costsim`)
+
+Rebuilds each past session call by call from Hermes' `state.db`, then prices it at Anthropic's list prices, with and without trimming at cold turns. 13 sessions of one install could be rebuilt, $746 of spend.
+
+| Policy | Estimated cost | Change |
+|---|---|---|
+| As recorded | $745.89 | |
+| Trim, Jev keeps 30% of old items | $583.94 | −21.7% |
+| Trim every old item | $499.81 | −33.0% |
+
+This is an estimate. It can't see extra work the agent does when it needs a trimmed item back.
+
+### Routing ceiling (Jev scoring real turns, about $0.02)
+
+- **Cheaper model after a pause:** Jev rated 5 of 137 cold turns easy and low-stakes. Routing those would save under 1%.
+- **Handing long tool loops to a cheap worker:** 0 of 88 turns with 15+ model calls (2,579 calls) passed as self-contained, mechanical and low-stakes.
+
+A cost check was added to `model_router`. It won't switch when:
+
+- the conversation doesn't fit the cheaper model, or
+- writing the prompt into the other model's cache costs more than the turn would save.
+
+For example, Opus 5.5's cache reads cost less than Sonnet 4.5's, so moving a warm Opus 5.5 conversation to Sonnet costs more.
+
+### Risk gate (31 labelled cases, 100 real past calls)
+
+| | v0.4 defaults | v0.5 |
+|---|---|---|
+| Labelled cases fully correct | 68% | 84% |
+| Dangerous calls stopped (block or review) | 100% | 100% |
+| Safe calls allowed | 64% | 100% |
+| Real calls sent to review | 67% | 15% |
+| Real calls blocked | 3% | 0% |
+| Latency p50 / p90 | 2,087 / 2,217 ms | 257 / 340 ms |
+
+What changed:
+
+- The check sees the earlier conversation.
+- "Not what was asked" alone no longer causes review.
+- The hazard questions are more specific.
+- The review threshold went from 0.5 to 0.7.
+- A code rule sends any write to agent config, shell profile, SSH, cloud-credential or dotenv files to review, unless the user clearly asked for it.
+
+An intermediate version without that last rule stopped only 90% of dangerous calls: it let an overwrite of the Hermes config through.
+
+For comparison, Hermes' own dangerous-command patterns, on the 22 shell cases:
+
+- dangerous calls flagged: 71%
+- calls needing a human flagged: 58%
+- safe calls flagged: 30%
+
+### Loop guard (real repeated failures)
+
+26 cases found by code in 5,064 real calls: the same command failing with the same error again. Against 80 non-repeats:
+
+| Threshold | Recall | False alarms |
+|---|---|---|
+| 0.5 | 46% | 15% |
+| 0.7 | 35% | 10% |
+| 0.8 (default) | 31% | 5% |
+
+It stays in shadow mode.
+
+### Tool-result filter: trust changes (A/B, 3 runs per arm)
+
+Changes made:
+
+- The note lists the line ranges that were cut and saves a full copy on disk.
+- Targeted reads of a line range are never filtered.
+
+On the two filter tasks, prompt tokens fell 10% but cost rose 5%. On two "on" runs the agent loaded a suggested skill and re-read the file in ranges, which raised cache writes from 54k to 81k.
+
+A new "does the task need the whole content?" question now passes whole-document tasks through, such as "summarise every release" (0.95) and "translate" (0.97). It hasn't been A/B tested.
+
 ## September 25, 2026: data ingestion (SEC 10-K cover pages)
 
 Six fields per filing, with the correct values taken from SEC's structured data (submissions API and XBRL `dei` facts), not from the documents: state of incorporation, tax ID, fiscal year end, SEC file number, shares outstanding, public float. Each document is the first 25,000 characters of the 10-K. Baselines: Claude Sonnet 4.5 and Claude Haiku 4.5, each reading the whole document and filling every field in one call. Escalation model: Sonnet 4.5. Costs are list prices from real token counts.

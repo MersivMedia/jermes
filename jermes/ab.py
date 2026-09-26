@@ -41,11 +41,10 @@ from .savings import JEV_INPUT_PER_M, Prices
 REPO = Path(__file__).resolve().parents[1]
 
 ON_CONFIG = """\
-backend:
-  deadline_s: 6
 points:
   skill_suggest: {{mode: {skill}}}
   result_filter: {{mode: {filt}}}
+  context_trim: {{mode: {trim}}}
   risk_gate: {{mode: shadow}}
   loop_guard: {{mode: shadow}}
   model_router: {{mode: off}}
@@ -135,7 +134,9 @@ def _make_home(src: Path, arm: str, points: Dict[str, str]) -> Path:
         os.symlink(REPO, home / "plugins" / "jermes", target_is_directory=True)
         cfg["plugins"] = {"enabled": ["jermes"]}
         (home / "jermes").mkdir()
-        (home / "jermes" / "config.yaml").write_text(ON_CONFIG.format(**points))
+        (home / "jermes" / "config.yaml").write_text(ON_CONFIG.format(**{"trim": "off", **points}))
+        if points.get("trim", "off") != "off":
+            cfg["context"] = {"engine": "jermes"}
     (home / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False))
     return home
 
@@ -181,15 +182,22 @@ def run_one(task: Task, arm: str, repeat: int, *, src_home: Path, points: Dict[s
     run = Run(task.name, arm, repeat)
     env = clean_env(home, work, arm)
     t0 = time.monotonic()
-    try:
-        p = subprocess.run(_hermes_bin() + ["chat", "-Q", "--yolo", "-q", task.prompt], cwd=work, env=env,
-                           capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
-        run.exit_code = p.returncode
-        if p.returncode != 0:
-            run.error = (p.stderr or p.stdout)[-400:]
-    except subprocess.TimeoutExpired:
-        run.error = f"timeout after {timeout}s"
-        run.exit_code = -1
+    prompts = [task.prompt] + list(task.followups)
+    for i, prompt in enumerate(prompts):
+        if i:
+            time.sleep(task.pause_s)
+        argv = _hermes_bin() + ["chat", "-Q", "--yolo"] + (["--continue"] if i else []) + ["-q", prompt]
+        try:
+            p = subprocess.run(argv, cwd=work, env=env, capture_output=True, text=True, timeout=timeout,
+                               stdin=subprocess.DEVNULL)
+            run.exit_code = p.returncode
+            if p.returncode != 0:
+                run.error = f"turn {i + 1}: " + (p.stderr or p.stdout)[-400:]
+                break
+        except subprocess.TimeoutExpired:
+            run.error = f"turn {i + 1}: timeout after {timeout}s"
+            run.exit_code = -1
+            break
     run.seconds = round(time.monotonic() - t0, 1)
     run.ok, run.check = task.check(work)
     usage = _session_usage(home)
@@ -226,7 +234,7 @@ def preflight(src_home: Path) -> List[str]:
 
 def run_ab(task_names: List[str], repeats: int = 1, *, points: Optional[Dict[str, str]] = None,
            src_home: Optional[Path] = None, timeout: int = 900, out_path: Optional[Path] = None,
-           progress=print) -> List[Run]:
+           progress=print, parallel: int = 0) -> List[Run]:
     points = points or {"skill": "advise", "filt": "enforce"}
     src_home = src_home or Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
     problems = preflight(src_home)
@@ -234,11 +242,22 @@ def run_ab(task_names: List[str], repeats: int = 1, *, points: Optional[Dict[str
         raise RuntimeError("; ".join(problems))
     runs: List[Run] = []
     tasks = [BY_NAME[n] for n in task_names]
+    jobs = []
     for rep in range(repeats):
         for i, task in enumerate(tasks):
             order = ["off", "on"] if (i + rep) % 2 == 0 else ["on", "off"]
-            for arm in order:
-                r = run_one(task, arm, rep, src_home=src_home, points=points, timeout=timeout)
+            jobs += [(task, arm, rep) for arm in order]
+    # Tasks with pauses run concurrently (waiting is most of their time).
+    parallel = parallel or (8 if any(t.pause_s for t in tasks) else 1)
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    with ThreadPoolExecutor(parallel) as ex:
+        futs = {ex.submit(run_one, task, arm, rep, src_home=src_home, points=points, timeout=timeout): (task, arm, rep)
+                for task, arm, rep in jobs}
+        for fut in as_completed(futs):
+            task, arm, rep = futs[fut]
+            r = fut.result()
+            if True:
                 runs.append(r)
                 if progress:
                     progress(f"  {task.name:<14} {arm:<3} rep{rep}  {'PASS' if r.ok else 'FAIL'}  "

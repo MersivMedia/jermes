@@ -5,10 +5,12 @@ import json
 from jermes.points import loop_guard, model_router, result_filter, risk_gate, skill_suggest
 from jermes.questions import ChoiceAnswer, NoulAnswer, ScoreAnswer
 
-CFG = {"block_threshold": 0.85, "review_threshold": 0.5, "review_risk_score": 2.5, "mismatch_threshold": 0.2}
+from jermes.config import DEFAULTS
+
+CFG = dict(DEFAULTS["points"]["risk_gate"])   # the shipped defaults, so the test tracks them
 
 
-def _risk(score=0.0, conf=0.9, destructive=0.05, exfil=0.05, match="yes", p_no=0.02, injected=None):
+def _risk(score=0.0, conf=0.9, destructive=0.05, exfil=0.05, match="yes", p_no=0.02, injected=None, cfg=None):
     probs = {"yes": 0.9, "partly": 0.05, "no": p_no, "unclear": 0.03}
     a = {
         "risk": ScoreAnswer(score=score, probabilities={}, confidence=conf),
@@ -18,7 +20,7 @@ def _risk(score=0.0, conf=0.9, destructive=0.05, exfil=0.05, match="yes", p_no=0
     }
     if injected is not None:
         a["injected"] = NoulAnswer(injected)
-    return risk_gate.make_policy(CFG)(a)
+    return risk_gate.make_policy({**CFG, **(cfg or {})})(a)
 
 
 def test_risk_gate_policy_bands():
@@ -28,8 +30,15 @@ def test_risk_gate_policy_bands():
     assert _risk(exfil=0.9, p_no=0.5).action == "block"
     assert _risk(injected=0.9).action == "block"
     assert _risk(score=3.1).action == "review"
-    assert _risk(match="no").action == "review"
-    assert _risk(destructive=0.6).action == "review"
+    # Defaults since v0.5: a "not requested" call with no hazard is allowed, and a
+    # hazard needs 0.7 to reach review (0.5 flooded review on real calls).
+    assert _risk(match="no").action == "allow"
+    assert _risk(destructive=0.6).action == "allow"
+    assert _risk(destructive=0.75).action == "review"
+    # The stricter behaviour is still available by config.
+    strict = {"review_threshold": 0.5, "review_on_mismatch": True}
+    assert _risk(match="no", cfg=strict).action == "review"
+    assert _risk(destructive=0.6, cfg=strict).action == "review"
 
 
 def test_risk_gate_directives():
@@ -57,7 +66,41 @@ def test_result_filter_roundtrip_json():
     assert key == "content" and text == wrapper["content"]
     out = json.loads(result_filter.render(chunks, [1, 4], w, key, len(text)))
     assert "para 1" in out["content"] and "para 4" in out["content"] and "para 2" not in out["content"]
-    assert "omitted by jermes" in out["content"] and out["success"] is True
+    assert "judged not relevant" in out["content"] and out["success"] is True
+
+
+def test_result_filter_render_maps_omitted_lines_to_the_file():
+    # read_file output: the omitted ranges must use the file's own line numbers.
+    lines = [f"{i:>6}|line {i} text" for i in range(1, 41)]
+    text = "\n".join(lines)
+    chunks = ["\n".join(lines[i:i + 10]) for i in range(0, 40, 10)]
+    out = result_filter.render(chunks, [2], None, None, len(text), text=text,
+                               saved_path="/tmp/x/full.txt", task="find the thing")
+    assert "[... lines 1-20 omitted (2 sections" in out
+    assert "[... lines 31-40 omitted (1 section" in out
+    assert "line 25 text" in out and "line 5 text" not in out
+    assert "/tmp/x/full.txt" in out and '"find the thing"' in out
+    assert "reads of a specific range are never screened" in out
+
+
+def test_result_filter_render_plain_text_lines():
+    text = "alpha\nbeta\n\ngamma\ndelta\n\nepsilon"
+    chunks = ["alpha\nbeta", "gamma\ndelta", "epsilon"]
+    out = result_filter.render(chunks, [1], None, None, len(text), text=text)
+    assert "[... lines 1-2 omitted" in out and "[... line 7 omitted" in out
+    assert "Full output:" not in out        # no copy on disk: don't point at one
+
+
+def test_result_filter_saves_full_copy_owner_only(tmp_path):
+    p = result_filter.save_full("secret-ish output", tmp_path / "full")
+    assert p and open(p).read() == "secret-ish output"
+    import os
+    import stat
+
+    assert stat.S_IMODE(os.stat(p).st_mode) == 0o600
+    for i in range(5):
+        result_filter.save_full(f"x{i}", tmp_path / "full", keep=3)
+    assert len(list((tmp_path / "full").glob("*.txt"))) == 3
 
 
 def test_result_filter_skips_errors_and_policy_failsafe():
@@ -171,3 +214,51 @@ def test_model_router_policy():
     assert pol({**easy, "high_stakes": NoulAnswer(0.6)}).action == "default"
     assert pol({**easy, "difficulty": ScoreAnswer(0.1, {}, 0.4)}).action == "default"
     assert pol({**easy, "difficulty": ScoreAnswer(1.5, {}, 0.9)}).action == "default"
+
+
+def test_result_filter_chunking_keeps_sections_and_splits_walls():
+    # read_file numbers blank lines too; a Markdown section must stay whole.
+    md = ["# Notes", "", "## 1.0", "- a", "- b", "", "## 1.1", "- c", "- d"]
+    text = "\n".join(f"{i:>6}|{l}" for i, l in enumerate(md, 1))
+    ch = result_filter.chunk(text, 120)
+    assert len(ch) == 3 and ch[1].splitlines()[0].endswith("## 1.0") and ch[1].endswith("- b")
+    # A wall of text with no blank lines is split instead of kept as one chunk.
+    wall = "\n".join(f"{i:>6}|speaker {i}: something was said here" for i in range(1, 801))
+    ch = result_filter.chunk(wall, 100)
+    assert 50 <= len(ch) <= 100 and max(len(c) for c in ch) < 3 * len(wall) / 100
+    assert "\n".join(ch).count("|speaker") == 800
+
+
+def test_result_filter_render_adds_breadcrumb_for_headless_chunk():
+    chunks = ["## 7.27\n- one", "- the answer line", "## 7.28\n- other"]
+    out = result_filter.render(chunks, [1], None, None, 50, text="\n\n".join(chunks))
+    assert "(under: ## 7.27)\n- the answer line" in out
+
+
+def test_result_filter_leaves_targeted_reads_alone():
+    t = result_filter.targeted
+    assert t("read_file", {"path": "x", "offset": 127, "limit": 280})
+    assert t("read_file", {"path": "x", "limit": 50})
+    assert not t("read_file", {"path": "x"}) and not t("read_file", {"path": "x", "offset": 1})
+    assert t("terminal", {"command": "cat big.log | grep ERROR"}) and t("terminal", {"command": "sed -n 10,90p f"})
+    assert not t("terminal", {"command": "cat big.log"})
+
+
+def test_result_filter_passes_when_task_needs_everything():
+    pol = result_filter.make_policy({"keep_threshold": 0.5, "max_kept_fraction": 0.8}, 4)
+    some = {f"keep_{i}": NoulAnswer(0.9 if i == 2 else 0.1) for i in range(4)}
+    assert pol({**some, "needs_all": NoulAnswer(0.2)}).action == "filter"
+    v = pol({**some, "needs_all": NoulAnswer(0.9)})
+    assert v.action == "pass" and "complete output" in v.detail["reason"]
+    assert "needs_all" in result_filter.build("summarise all of it", "read_file", ["a", "b", "c"])[1]
+
+
+def test_router_switch_guard():
+    from jermes.points.model_router import switch_pays as s
+
+    assert not s("claude-opus-5-5", "claude-haiku-4-5", 280_000, cache_warm=True)[0]       # doesn't fit
+    assert not s("claude-opus-5-5", "claude-sonnet-4-5", 60_000, cache_warm=True)[0]      # cache read dearer
+    assert s("claude-opus-5", "claude-haiku-4-5", 60_000, cache_warm=False)[0]            # cold: pays at once
+    assert not s("claude-opus-5", "claude-haiku-4-5", 20_000, cache_warm=True, calls=2)[0]  # too short to pay back
+    assert s("anthropic/claude-opus-5", "anthropic/claude-haiku-4.5", 60_000, cache_warm=True)[0]  # gateway ids
+    assert not s("some-unknown-model", "claude-haiku-4-5", 60_000, cache_warm=True)[0]    # unknown price: stay

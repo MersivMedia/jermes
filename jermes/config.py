@@ -30,7 +30,7 @@ DEFAULTS: Dict[str, Any] = {
         "base_url": None,
         "model": None,
         "deadline_s": 2.5,
-        "max_retries": 1,
+        "max_retries": 3,     # retries stop at deadline_s; Vercel 503s are brief and random
         "zero_data_retention": False,
     },
     "redact": True,
@@ -53,9 +53,12 @@ DEFAULTS: Dict[str, Any] = {
                 "cronjob", "browser_click", "browser_type", "skill_manage", "delegate_task",
             ],
             "block_threshold": 0.85,
-            "review_threshold": 0.50,
+            "review_threshold": 0.70,     # 0.5 sent 20-40% of real calls to review; see docs/RESULTS.md
             "review_risk_score": 2.5,
             "mismatch_threshold": 0.20,
+            "review_on_mismatch": False,  # "not requested" alone flooded review (35% of real calls)
+            "context_messages": 6,        # earlier turns, so "ok go ahead" is read against the plan
+            "context_chars": 500,
             "max_arg_chars": 4000,
         },
         # D5 - tool-result relevance filter (transform_tool_result)
@@ -67,6 +70,7 @@ DEFAULTS: Dict[str, Any] = {
             "max_chunks": 120,
             "keep_threshold": 0.35,
             "max_kept_fraction": 0.85,
+            "needs_all_threshold": 0.6,   # pass through when the task needs the whole output
         },
         # D6 - loop and completion notes (transform_tool_result)
         "loop_guard": {
@@ -82,6 +86,20 @@ DEFAULTS: Dict[str, Any] = {
             "max_difficulty": 0.6,
             "min_confidence": 0.7,
             "max_stakes": 0.3,
+            "cache_ttl_s": 300,       # cost check: is the current model's cache still warm?
+            "expected_calls": 6,      # cost check: model calls a routed turn is assumed to make
+        },
+        # X3 - context trimming (context engine; active only with `context: {engine: jermes}`
+        # in Hermes' config.yaml). Scores old tool traffic on cold turns; drops become stubs.
+        "context_trim": {
+            "mode": "shadow",
+            "ttl_s": 300,             # provider cache TTL: trim only after a pause this long
+            "keep_turns": 2,          # the current and previous user turn are never trimmed
+            "min_chars": 1500,        # items smaller than this aren't worth a question
+            "keep_threshold": 0.5,    # Jev's "still needed" below this -> stub
+            "max_items": 150,
+            "excerpt_chars": 700,
+            "request_chars": 60000,
         },
         # Ingestion pipeline (explicit tool/CLI, not a hook). Jev only picks
         # among candidates code found; it never writes values.

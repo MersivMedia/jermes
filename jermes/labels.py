@@ -286,23 +286,36 @@ SHEET_HELP = ("Fill in correct_skills: skill names separated by commas, 'none' i
               "or leave blank to skip. Leave the key column unchanged.")
 
 
+BLIND_COLS = ["key", "request", "earlier_conversation", "correct_skills"]
+
+
 def export_sheet(turns, rank: Callable[[Any], Optional[List[str]]], dest: Path, *, path: Optional[Path] = None,
-                 include_labelled: bool = False) -> int:
+                 include_labelled: bool = False, blind: bool = False) -> int:
+    """Write a labelling sheet.
+
+    ``blind=True`` hides both Jev's list and what the agent loaded, so labels
+    can't anchor on either (batch 1 showed Jev's list, and 26 of 40 labels
+    matched it exactly). Jev isn't called at all for a blind sheet.
+    """
     import csv
 
     done = load_labels(path)
     rows = 0
     with Path(dest).open("w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)
-        w.writerow(SHEET_COLS)
+        w.writerow(BLIND_COLS if blind else SHEET_COLS)
         for t in turns:
             key = turn_key(t.session_id, t.message_id)
             if key in done and not include_labelled:
                 continue
-            jev = rank(t)
             prior = [m for m in t.history if isinstance(m.get("content"), str) and m["content"].strip()][-4:]
             conv = " || ".join(f"{m['role']}: {' '.join(m['content'].split())[:200]}" for m in prior)
             existing = done.get(key)
+            if blind:
+                w.writerow([key, _redact(t.request)[:1500], _redact(conv), ""])
+                rows += 1
+                continue
+            jev = rank(t)
             w.writerow([key, _redact(t.request)[:1500], _redact(conv), ", ".join(dict.fromkeys(t.loaded_skills)),
                         "none" if jev == [] else ", ".join(jev or []),
                         ("none" if existing.none else ", ".join(existing.skills)) if existing else ""])

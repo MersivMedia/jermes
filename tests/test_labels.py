@@ -128,3 +128,19 @@ def test_jev_ok_is_a_real_bool_that_survives_json():
     preds = {"s#1": [], "s#2": [], "s#3": ["comfyui", "x"]}
     rep = json.loads(json.dumps(labels.score(labs, lambda lab: preds[lab.key]), default=str))
     assert [r["jev_ok"] for r in rep["rows"]] == [False, True, True]
+
+
+def test_blind_export_hides_jev_and_agent(tmp_path):
+    import csv
+
+    from jermes import labels
+    from jermes.replay import Turn
+
+    t = Turn("s1", 7, "make me a deck", loaded_skills=["powerpoint"], history=[])
+    called = []
+    dest = tmp_path / "blind.csv"
+    n = labels.export_sheet([t], lambda turn: called.append(1) or ["powerpoint"], dest,
+                            path=tmp_path / "labels.jsonl", blind=True)
+    rows = list(csv.DictReader(dest.open()))
+    assert n == 1 and not called                      # Jev not even asked
+    assert list(rows[0]) == labels.BLIND_COLS and "powerpoint" not in dest.read_text()

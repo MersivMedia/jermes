@@ -14,7 +14,7 @@ Jev only supplies the judgment. Code owns the policy: thresholds you can read de
 
 The design, the evidence behind it, and the rollout plan are in the **[PRD](docs/PRD.md)**.
 
-> **Status: v0.4, Phase 0 (shadow mode).** Every decision point ships in `shadow`. Jermes calls Jev and logs what it *would* do, but changes nothing in Hermes until you promote a point.
+> **Status: v0.5, Phase 0 (shadow mode).** Every decision point ships in `shadow`. Jermes calls Jev and logs what it *would* do, but changes nothing in Hermes until you promote a point. Context trimming also needs `context: {engine: jermes}` in Hermes' config.yaml.
 >
 > Latest measurements (details in [Test results](#test-results)):
 > - **Ingestion:** on 16 SEC 10-K filings not used during development, the Jev pipeline matched a strong model on every value (94/94) at **11x lower cost**, sending 94% fewer tokens to the strong model.
@@ -101,7 +101,8 @@ Jermes uses only public Hermes plugin surfaces. It needs no core patches and nev
 | `risk_gate` | D3, D4 | `pre_tool_call` hook | Blocks clearly dangerous, unrequested calls. Sends uncertain ones to Hermes' approval gate. |
 | `result_filter` | D5 | `transform_tool_result` hook | Drops irrelevant sections of big tool results before the model re-reads them every turn. |
 | `loop_guard` | D6 | `transform_tool_result` hook | Adds a one-line note when a failed call is repeated or the task already looks done. |
-| `model_router` | D7 | `llm_request` middleware | Sends confidently easy, low-stakes turns to a cheaper model, sticky for the whole turn. |
+| `model_router` | D7 | `llm_request` middleware | Sends confidently easy, low-stakes turns to a cheaper model, sticky for the whole turn. A cost check refuses the switch when the conversation won't fit the cheaper model or rewriting the prompt cache would cost more than the turn saves. |
+| `context_trim` | X3 | context engine (`context: {engine: jermes}`) | After a pause long enough for the prompt cache to expire, Jev scores old tool traffic: "will this still be needed?" Items it drops are replaced by one-line stubs pointing to the full text on disk. See [Context trimming](#context-trimming). |
 | `ingest` | I2 to I9 | `hermes jermes ingest` (explicit, not a hook) | Extracts fields from documents: code finds candidates, Jev picks, code copies. Only flagged fields reach a strong model. See [Data ingestion](#data-ingestion). |
 
 ### Skill selection
@@ -158,6 +159,35 @@ fields:
 
 Candidate kinds: `date`, `money`, `number`, `percent`, `size`, `code`, `email`, `phone`, `url`, `jurisdiction`, `name`. The strong model for escalation defaults to `anthropic:claude-sonnet-4-5` (needs `ANTHROPIC_API_KEY`); any OpenAI-compatible gateway model ID also works via `--strong`.
 
+### Context trimming
+
+In a long session, most of every model request is tool traffic from finished steps: command output, file contents, and the big arguments the agent wrote itself (whole files, patches, scripts). All of it is re-sent on every call.
+
+Jermes registers a Hermes context engine that keeps Hermes' own compressor and adds one step per request:
+
+1. **Only after a pause.** When no model call has happened for longer than the provider's cache lifetime (5 minutes by default), the next request has to be written to the cache in full anyway, so changing old content costs nothing extra. Mid-loop requests are never changed.
+2. **Jev scores each old item** (older than the last two user turns, at least 1,500 characters): "will this still be needed, verbatim, for the current request?"
+3. **Dropped items become stubs**, such as `[jermes: output of terminal (command=npm run build) from an earlier step, 3,000 characters, trimmed as no longer needed. Full text: .../full_results/9f2c.txt]`. Long tool-call arguments are shortened inside the JSON, so they stay valid.
+4. **Stubs are re-applied byte-for-byte** on every later request, so the trimmed prompt is what gets cached. At the next pause every item is decided again, and one the new request needs comes back verbatim.
+
+The trimming applies to the request only; the stored transcript is never changed. Memory, todo and clarify results are never trimmed. Any Jev error sends the request unchanged.
+
+In Hermes' main config file:
+
+```yaml
+context:
+  engine: jermes
+```
+
+In Jermes' config (`jermes/config.yaml` in your Hermes home):
+
+```yaml
+points:
+  context_trim: { mode: enforce }   # shadow: log what would be trimmed
+```
+
+`hermes jermes costsim` rebuilds your past sessions call by call and prices them with this trimming applied (offline, no Jev calls).
+
 ### Guarantees built into the code
 
 - **Deterministic.** Decisions are cached by `(model, canonical state, question spec)`. The same input always produces the same action, even if Jev's sampling drifts.
@@ -179,6 +209,9 @@ hermes jermes score     # score Jev and the agent against your labels
 hermes jermes ingest    # extract fields from documents; --bench compares against models
 hermes jermes savings   # estimate tokens and dollars Jermes would have saved on your sessions
 hermes jermes ab        # run fixed tasks with Jermes off and on; compare Hermes' own costs
+hermes jermes costsim   # price past sessions with context trimming applied (offline)
+hermes jermes riskbench # score the risk gate on labelled cases and real past calls
+hermes jermes loopbench # score the loop guard on real repeated failures
 hermes jermes stats     # decisions, cache hits, latency, tokens per point
 hermes jermes recent    # last decisions
 ```
@@ -265,6 +298,23 @@ The skill list is read live, so a description change takes effect on the next re
 
 Latest results for each area. Earlier measurements and what each change did are in [docs/RESULTS.md](docs/RESULTS.md).
 
+### Context trimming (September 26, 2026)
+
+**Live A/B, one pair.** A four-turn Hermes session with a 5.5-minute pause before each follow-up (both arms), so the prompt cache really expires. Turn 1 reads three large files; later turns need details from them. Claude Opus 5.5, everything else in Jermes off.
+
+| | Correct | Cost |
+|---|---|---|
+| Hermes alone | yes | $4.21 |
+| With context trimming | yes | **$2.86 (−32%)** |
+
+Jev trimmed six old file reads (293k characters). The agent answered the later questions from its own earlier summary, so this pair doesn't test a trimmed item being needed again. One pair is a first result, not a measurement of the average.
+
+**Offline estimate** (`hermes jermes costsim`, 13 real sessions, $746 of spend): −22% if Jev keeps 30% of old items, −33% if every old item is trimmed.
+
+### Risk gate (September 26, 2026)
+
+31 labelled cases and 100 real past calls: every dangerous case was stopped, every safe case was allowed, and 15% of real calls went to review, with none blocked. Latency: 257 ms at the median. Details and the before/after table are in [docs/RESULTS.md](docs/RESULTS.md).
+
 ### Data ingestion: SEC 10-K cover pages (September 25, 2026)
 
 16 real 10-K filings, fetched from EDGAR, that were never used while building the candidate finders or writing the field questions. Six fields per filing: state of incorporation, tax ID, fiscal year end, SEC file number, shares outstanding, public float. The correct values come from SEC's own structured data, not from reading the documents. Values that don't appear in the document text are left out of scoring (2 of 96), so 94 values are scored. Each document is the first 25,000 characters of the filing, so the cover values sit among real business text and dozens of other numbers.
@@ -332,8 +382,9 @@ Caveats:
 - **Vercel rate limits.** A new Vercel account allowed 30 requests per window. Skill selection makes two calls per request. Normal use, with pauses while you read replies, should stay under that; back-to-back automation will not.
 - **Vercel 503s.** During testing, up to about 20% of calls got a temporary 503 from the gateway. Live hooks fail open (Hermes carries on unchanged); replay retries.
 - **OpenRouter is untested live.** The request format matches OpenRouter's documentation and is covered by tests, but no live call has been made with an OpenRouter key yet.
-- **Live latency hasn't been measured.** Single calls took 0.8 to 2 s. Timings recorded during replay include deliberate waits, so they don't reflect live use.
-- **Scored so far:** skill selection (hand labels), `result_filter` (A/B cost, mixed results), and ingestion (SEC benchmark). `risk_gate`, `loop_guard` and `model_router` are built and tested offline but have no measured results yet.
+- **Latency.** The risk gate took 243 ms at the median and 340 ms at the 90th percentile over 100 real calls. Skill selection makes two calls in sequence.
+- **Scored so far:** skill selection (hand labels), `result_filter` (A/B cost, mixed results), ingestion (SEC benchmark), `risk_gate` (31 labelled cases and 100 real calls) and `loop_guard` (real repeated failures). `model_router` has a cost check but no measured results.
+- **Routing saves little on long, judgment-heavy sessions.** On one install, Jev rated 5 of 137 turns after a pause as easy enough for a cheaper model, and none of 88 long tool loops as safe to hand to a cheap worker. Context trimming is where that install's savings are.
 - **Agents may not trust filtered results.** When `result_filter` trims a file, the agent sometimes re-reads or searches it anyway, which costs more than not filtering.
 - **Ingestion is sequential and slow** (about 34 s per document on Vercel), and its accuracy has only been measured on clean, typed text.
 - **Vercel blocks paid models on free-tier accounts.** The ingestion baselines and escalation therefore use `ANTHROPIC_API_KEY` directly.
@@ -351,8 +402,9 @@ backend:
 
 points:
   skill_suggest: { mode: advise, fits_threshold: 0.5, max_listed: 4, context_messages: 10 }
-  risk_gate:     { mode: enforce, block_threshold: 0.85, review_threshold: 0.5 }
+  risk_gate:     { mode: enforce, block_threshold: 0.85, review_threshold: 0.7 }
   result_filter: { mode: enforce, keep_threshold: 0.35 }
+  context_trim:  { mode: enforce, ttl_s: 300, keep_turns: 2, keep_threshold: 0.5 }
   loop_guard:    { mode: advise }
   model_router:  { mode: shadow, cheap_model: "anthropic/claude-haiku-4-5" }
 ```
@@ -365,7 +417,7 @@ Modes: `off` → `shadow` (log only) → `advise` (notes and suggestions) → `e
 
 ```bash
 uv venv && uv pip install -e '.[dev]'
-pytest                                  # 127 tests, offline; Jev is faked at the HTTP layer
+pytest                                  # 164 tests, offline; Jev is faked at the HTTP layer
 HERMES_AGENT_DIR=~/hermes-agent pytest  # also runs the end-to-end test against a real Hermes checkout
 ```
 
@@ -374,6 +426,7 @@ The end-to-end tests run against a real Hermes checkout in a temporary `HERMES_H
 - load Jermes through Hermes' `PluginManager`, fire `pre_tool_call` through Hermes' own dispatch, and check a dangerous call is blocked and a benign one passes
 - create a skill mid-session and check the very next Jev call sees it
 - check disabled skills are never offered
+- load the Jermes context engine through Hermes' plugin system, deep-copy it the way Hermes does per agent, and trim a request through Hermes' own request hook
 
 ## Roadmap (from the PRD)
 
@@ -383,12 +436,14 @@ The end-to-end tests run against a real Hermes checkout in a temporary `HERMES_H
 - [x] Skill list read on every call (new skills seen mid-session); hand-labelling and scoring
 - [x] First 40 hand labels; context set to 10 messages; first skill-description fix
 - [ ] Blind labelling batch (Jev's answer hidden) and 100+ labels; tune `fits_threshold`
-- [ ] Live latency test; OpenRouter live test
+- [ ] OpenRouter live test
 - [x] Token-savings measurement: offline estimate over real sessions and task-matched A/B through real Hermes
 - [x] Data-ingestion pipeline (PRD §6): triage, screening, select-don't-generate extraction, verify-then-escalate; SEC benchmark
-- [ ] Make filtered results trustworthy to the agent (wording, or a way to fetch omitted sections)
+- [x] Filtered results: line ranges of what was cut, full copy on disk, targeted reads never filtered, "needs the whole thing" pass-through
+- [x] Context trimming engine (cold turns only, stubs with full text on disk); offline cost simulator
+- [x] Router cost check (context fit, cache rewrite cost)
 - [ ] Harder ingestion benchmark (scanned documents, ambiguous fields); request intake (I1); parallel Jev requests
-- [ ] Label and score `risk_gate`, `loop_guard`
+- [x] Score `risk_gate` and `loop_guard`; protected-path rule for config and credential files
 - [ ] Phase 1 to 2: promote `result_filter`, `skill_suggest`, `risk_gate`
 - [ ] Workstream 3 extras (PRD §7): gateway triage, cron wake gating, memory filter, citation checks
 - [ ] Cross-provider routing via `llm_execution` middleware

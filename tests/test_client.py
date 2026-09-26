@@ -147,3 +147,24 @@ def test_openrouter_backend_wire_format(fake, monkeypatch):
     assert req["headers"]["authorization"] == "Bearer or-key"
     assert req["body"]["model"] == "typesafe/jev-1.13"
     assert "providerOptions" not in req["body"]  # Vercel-only field
+
+
+def test_brief_503s_are_retried_within_the_live_deadline(fake):
+    # Vercel returns occasional one-off 503s; the live client should ride
+    # through two of them and still answer inside its 2.5 s budget.
+    import time
+
+    calls = {"n": 0}
+    orig = fake.handler
+
+    def flaky(request):
+        calls["n"] += 1
+        if calls["n"] <= 2:
+            return httpx.Response(503, json={"error": {"type": "service_unavailable_error", "message": "x"}})
+        return orig(request)
+
+    c = JevClient(ClientConfig(api_key="k"), transport=httpx.MockTransport(flaky))
+    t0 = time.monotonic()
+    r = c.ask({"x": 1}, {"q": Noul("?")})
+    assert calls["n"] == 3 and r.answers["q"].probability == 0.1
+    assert time.monotonic() - t0 < 2.5

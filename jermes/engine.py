@@ -133,7 +133,7 @@ class Engine:
                 base_url=b.get("base_url"),
                 model=b.get("model"),
                 deadline_s=float(b.get("deadline_s", 2.5)),
-                max_retries=int(b.get("max_retries", 1)),
+                max_retries=int(b.get("max_retries", 3)),
                 zero_data_retention=bool(b.get("zero_data_retention", False)),
             )
         )

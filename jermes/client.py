@@ -80,7 +80,7 @@ class ClientConfig:
     api_key: Optional[str] = None
     api_key_env: Optional[str] = None
     deadline_s: float = 2.5
-    max_retries: int = 1
+    max_retries: int = 3  # bounded by deadline_s, so retries never delay Hermes
     min_interval_s: float = 0.0  # pacing between requests (batch/replay use; live hooks keep 0)
     zero_data_retention: bool = False
 
@@ -169,11 +169,13 @@ class JevClient:
         url = f"{cfg['base_url']}/v1/systemone"
         headers = {"Authorization": f"Bearer {cfg['api_key']}", "Content-Type": "application/json"}
 
-        start = time.monotonic()
-        deadline = start + self.config.deadline_s
+        deadline = time.monotonic() + self.config.deadline_s
+        start: Optional[float] = None
         attempt = 0
         while True:
             self._pace()
+            if start is None:
+                start = time.monotonic()  # latency excludes the pacing wait (batch jobs only)
             remaining = deadline - time.monotonic()
             if remaining <= 0.05:
                 raise JevError("deadline exceeded", kind="timeout")
@@ -188,7 +190,7 @@ class JevClient:
                 break
             if resp.status_code in RETRYABLE_STATUS and attempt < self.config.max_retries:
                 attempt += 1
-                backoff = _retry_after(resp) or (0.2 * (2 ** attempt) + random.uniform(0, 0.1))
+                backoff = _retry_after(resp) or (0.15 * (2 ** attempt) + random.uniform(0, 0.05))
                 if time.monotonic() + backoff >= deadline:
                     raise JevError(f"HTTP {resp.status_code}; no time to retry", status=resp.status_code,
                                    kind=_error_kind(resp))
@@ -196,7 +198,7 @@ class JevClient:
                 continue
             raise JevError(_error_message(resp), status=resp.status_code, kind=_error_kind(resp))
 
-        latency_ms = (time.monotonic() - start) * 1000.0
+        latency_ms = (time.monotonic() - (start or time.monotonic())) * 1000.0
         try:
             body = resp.json()
             answers = {qid: parse_answer(a) for qid, a in (body.get("answers") or {}).items()}

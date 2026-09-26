@@ -17,8 +17,9 @@ from __future__ import annotations
 import json
 import logging
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from .engine import Engine, Verdict
 from .points import loop_guard, model_router, result_filter, risk_gate, skill_suggest
@@ -30,6 +31,13 @@ def _ranked(_answers: Dict[str, Any]) -> Verdict:
     return Verdict("ranked")
 
 
+def _rough_tokens(messages: Any) -> int:
+    try:
+        return len(json.dumps(messages, ensure_ascii=False, default=str)) // 4
+    except Exception:
+        return 0
+
+
 class Harness:
     def __init__(self, engine: Optional[Engine] = None) -> None:
         self.engine = engine or Engine()
@@ -37,6 +45,10 @@ class Harness:
         self.history = loop_guard.History(window=int(cfg["loop_guard"].get("window", 8)))
         self._lock = threading.Lock()
         self._last_result: Dict[str, str] = {}
+        self._context: Dict[str, str] = {}  # earlier conversation per session, for the risk gate
+        self._model: Dict[str, str] = {}          # last model requested per session (router cost check)
+        self._prompt_tokens: Dict[str, int] = {}  # rough size of the last request
+        self._last_llm: Dict[str, float] = {}     # time of the last request (cache warmth)
         self._route: Dict[str, str] = {}  # session_id -> cheap model for this turn
         self._roster: Optional[list] = None
         # Shadow-mode decisions are observed, never acted on, so they must not
@@ -66,11 +78,23 @@ class Harness:
                 self._route.pop(session_id, None)
             self._route_turn(session_id, user_message or "")
             history = conversation_history if isinstance(conversation_history, list) else None
+            self._remember_context(session_id, user_message or "", history)
             block = self._suggest_skill(session_id, user_message or "", history)
             return {"context": block} if block else None
         except Exception:
             logger.debug("jermes pre_llm_call failed", exc_info=True)
             return None
+
+    def _remember_context(self, session_id: str, user_message: str, history: Optional[List[Any]]) -> None:
+        """Earlier conversation for the risk gate: the same view skill selection gets."""
+        cfg = self.engine.point_config("risk_gate")
+        n = int(cfg.get("context_messages", 6))
+        ctx = ""
+        if history and n > 0:
+            ctx = skill_suggest.format_context(skill_suggest.history_before_request(history, user_message),
+                                               max_messages=n, chars_each=int(cfg.get("context_chars", 500)))
+        with self._lock:
+            self._context[session_id] = ctx
 
     def _route_turn(self, session_id: str, user_message: str) -> None:
         point = "model_router"
@@ -85,6 +109,13 @@ class Harness:
         d = self.engine.decide(point, state, qs, policy, **kw)
         cheap = cfg.get("cheap_model")
         if d.enforcing and d.action == "cheap" and cheap:
+            ok, why = model_router.switch_pays(
+                self._model.get(session_id, ""), str(cheap), self._prompt_tokens.get(session_id, 0),
+                cache_warm=self._cache_warm(session_id, float(cfg.get("cache_ttl_s", 300))),
+                calls=int(cfg.get("expected_calls", 6)))
+            if not ok:
+                logger.info("jermes model_router: not switching (%s)", why)
+                return
             with self._lock:
                 self._route[session_id] = str(cheap)
             self.engine.mark_applied(d)
@@ -187,9 +218,10 @@ class Harness:
             state = risk_gate.build_state(
                 tool_name, args or {}, self.history.request(sid),
                 last_tool_result=last, max_arg_chars=int(cfg.get("max_arg_chars", 4000)),
+                recent_context=self._context.get(sid, ""),
             )
             qs = risk_gate.questions(bool(last))
-            policy = risk_gate.make_policy(cfg)
+            policy = risk_gate.make_policy(cfg, protected=risk_gate.touches_protected(tool_name, args or {}))
             kw = {"session_id": sid, "spec_version": risk_gate.SPEC_VERSION, "log_detail": {"tool": tool_name}}
             if self._shadow(point, state, qs, policy, **kw):
                 return None
@@ -211,7 +243,7 @@ class Harness:
         try:
             if not isinstance(result, str):
                 return None
-            new = self._filter_result(sid, tool_name, result, status)
+            new = self._filter_result(sid, tool_name, result, status, args or {})
             current = new if new is not None else result
             note = self._loop_note(sid, tool_name, args or {}, result, status)
             with self._lock:
@@ -223,11 +255,12 @@ class Harness:
             logger.debug("jermes transform_tool_result failed", exc_info=True)
             return None
 
-    def _filter_result(self, sid: str, tool_name: str, result: str, status: str) -> Optional[str]:
+    def _filter_result(self, sid: str, tool_name: str, result: str, status: str,
+                       args: Optional[Dict[str, Any]] = None) -> Optional[str]:
         point = "result_filter"
         if not self.engine.enabled(point):
             return None
-        prepared = self.prepare_filter(tool_name, result, status, self.history.request(sid))
+        prepared = self.prepare_filter(tool_name, result, status, self.history.request(sid), args)
         if prepared is None:
             return None
         chunks, wrapper, key, text, state, qs, policy = prepared
@@ -239,9 +272,14 @@ class Harness:
         if not d.enforcing or d.action != "filter":
             return None
         self.engine.mark_applied(d)
-        return result_filter.render(chunks, d.detail["kept_idx"], wrapper, key, len(text))
+        from .store import data_dir
 
-    def prepare_filter(self, tool_name: str, result: str, status: str, task: str):
+        saved = result_filter.save_full(text, data_dir() / "full_results")
+        return result_filter.render(chunks, d.detail["kept_idx"], wrapper, key, len(text), text=text,
+                                    saved_path=saved, task=self.history.request(sid))
+
+    def prepare_filter(self, tool_name: str, result: str, status: str, task: str,
+                       args: Optional[Dict[str, Any]] = None):
         """Eligibility checks and question building for one tool result.
 
         Returns ``None`` when the result is not eligible (wrong tool, error,
@@ -252,6 +290,8 @@ class Harness:
         cfg = self.engine.point_config("result_filter")
         if tool_name not in set(cfg.get("tools") or []):
             return None
+        if result_filter.targeted(tool_name, args or {}):
+            return None  # the agent already chose what it needs
         if status and status not in ("ok", "success"):
             return None
         if not (int(cfg.get("min_chars", 6000)) <= len(result) <= int(cfg.get("max_chars", 100000))):
@@ -285,9 +325,25 @@ class Harness:
 
     # ------------------------------------------------------------------ LLM
 
+    def _cache_warm(self, session_id: str, ttl: float) -> bool:
+        last = self._last_llm.get(session_id)
+        return last is not None and (time.time() - last) <= ttl
+
     def llm_request_middleware(self, request: Optional[Dict[str, Any]] = None, session_id: str = "",
                                **kw: Any) -> Optional[Dict[str, Any]]:
-        """Swap the model for this turn when the router chose the cheap one."""
+        """Swap the model for this turn when the router chose the cheap one.
+
+        Also records the current model, the rough prompt size and the time of
+        the last request, which the router's cost check needs.
+        """
+        try:
+            if isinstance(request, dict):
+                with self._lock:
+                    self._model[session_id] = str(request.get("model") or kw.get("model") or "")
+                    self._prompt_tokens[session_id] = _rough_tokens(request.get("messages"))
+                    self._last_llm[session_id] = time.time()
+        except Exception:
+            pass
         try:
             cheap = self._route.get(session_id)
             if not cheap or not isinstance(request, dict) or "model" not in request:

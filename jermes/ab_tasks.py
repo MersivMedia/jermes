@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import json
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, List, Tuple
 
@@ -27,6 +27,8 @@ class Task:
     setup: Callable[[Path], None]
     check: Callable[[Path], Tuple[bool, str]]
     exercises: str
+    followups: List[str] = field(default_factory=list)   # later turns in the same session
+    pause_s: float = 0.0                                  # wait before each follow-up (cache expiry)
 
 
 def _answer(d: Path) -> str:
@@ -234,6 +236,23 @@ def _check_release_notes(d: Path) -> Tuple[bool, str]:
     return ("7.27" in a and "webhook" in a), f"answer.txt={a[:80]!r}"
 
 
+# ---------------------------------------------------------------- multi-turn session (context trimming)
+
+def _setup_session(d: Path) -> None:
+    _setup_big_log(d)
+    _setup_big_doc(d)
+    _setup_big_json(d)
+    _setup_fix(d)
+
+
+def _check_session(d: Path) -> Tuple[bool, str]:
+    a1 = (d / "answer1.txt").read_text().strip().lower() if (d / "answer1.txt").exists() else ""
+    a2 = (d / "answer2.txt").read_text().strip().lower() if (d / "answer2.txt").exists() else ""
+    fixed, _ = _check_fix(d)
+    ok = "billing-worker" in a1 and "750" in a2 and fixed
+    return ok, f"answer1={a1[:40]!r} answer2={a2[:40]!r} calc_fixed={fixed}"
+
+
 TASKS: List[Task] = [
     Task("big_log", "logs/app.log is our service log from this morning. Find the error that crashed the service "
          "and write only the name of the failing component to answer.txt.", _setup_big_log, _check_big_log,
@@ -256,6 +275,17 @@ TASKS: List[Task] = [
          "existing integrations after upgrading, and what breaks? Write the version and a one-line reason "
          "to answer.txt.", _setup_release_notes, _check_release_notes,
          "result_filter (full read, answer has no keyword to grep)"),
+    Task("session", "Read these three files in full with read_file and give me a short overview of each: "
+         "logs/app.log, spec.md, users.json.", _setup_session, _check_session,
+         "context_trim (4 turns, 5.5 min pauses; old file reads re-sent each call)",
+         followups=[
+             "Unrelated: the test in test_calc.py fails. Fix calc.py so it passes. Don't change the test.",
+             "Back to the log you read earlier: which component crashed the service? Write only its name "
+             "to answer1.txt.",
+             "And from the spec you read earlier: what is the maximum single-file upload size on the Team plan? "
+             "Write just the size to answer2.txt.",
+         ],
+         pause_s=330.0),
 ]
 
 BY_NAME = {t.name: t for t in TASKS}

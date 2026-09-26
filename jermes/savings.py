@@ -207,7 +207,8 @@ def estimate_result_filter(harness, conn, sessions, *, progress=print) -> Tuple[
         stats["filtered"] += 1
         from .points import result_filter as rf
 
-        new = rf.render(chunks, d.detail["kept_idx"], wrapper, key, len(text))
+        new = rf.render(chunks, d.detail["kept_idx"], wrapper, key, len(text), text=text,
+                        saved_path="/path/to/full.txt", task=request)
         removed = max(0, len(content) - len(new))
         removals.append(Removal(s.id, mid, "result_filter", tool, tok(removed), later_calls(conn, s, mid),
                                 f"kept {d.detail['kept']}/{d.detail['chunks']} sections"))
