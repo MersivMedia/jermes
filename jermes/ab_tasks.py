@@ -253,6 +253,27 @@ def _check_session(d: Path) -> Tuple[bool, str]:
     return ok, f"answer1={a1[:40]!r} answer2={a2[:40]!r} calc_fixed={fixed}"
 
 
+def _setup_recall(d: Path) -> None:
+    """Like ``session``, plus two minor details no overview would mention."""
+    _setup_session(d)
+    log = d / "logs" / "app.log"
+    lines = log.read_text().splitlines()
+    lines.insert(277, "2026-09-25T10:04:37Z INFO  [session-cache] token cache resized to 8192 entries (was 4096)")
+    log.write_text("\n".join(lines) + "\n")
+    spec = d / "spec.md"
+    parts = spec.read_text().split("\n\n")
+    parts.insert(len(parts) * 2 // 3, "Audit log retention on the Enterprise plan is 417 days; other plans keep 90 days.")
+    spec.write_text("\n\n".join(parts))
+
+
+def _check_recall(d: Path) -> Tuple[bool, str]:
+    a1 = (d / "answer1.txt").read_text().strip().lower() if (d / "answer1.txt").exists() else ""
+    a2 = (d / "answer2.txt").read_text().strip().lower() if (d / "answer2.txt").exists() else ""
+    fixed, _ = _check_fix(d)
+    ok = "8192" in a1.replace(",", "") and "417" in a2 and fixed
+    return ok, f"answer1={a1[:40]!r} answer2={a2[:40]!r} calc_fixed={fixed}"
+
+
 TASKS: List[Task] = [
     Task("big_log", "logs/app.log is our service log from this morning. Find the error that crashed the service "
          "and write only the name of the failing component to answer.txt.", _setup_big_log, _check_big_log,
@@ -284,6 +305,17 @@ TASKS: List[Task] = [
              "to answer1.txt.",
              "And from the spec you read earlier: what is the maximum single-file upload size on the Team plan? "
              "Write just the size to answer2.txt.",
+         ],
+         pause_s=330.0),
+    Task("recall", "Read these three files in full with read_file and give me a short overview of each: "
+         "logs/app.log, spec.md, users.json.", _setup_recall, _check_recall,
+         "context_trim, hard case (later turns need minor details no overview would include)",
+         followups=[
+             "Unrelated: the test in test_calc.py fails. Fix calc.py so it passes. Don't change the test.",
+             "Back to the log you read earlier: what size was the session-cache token cache resized to? "
+             "Write only the number to answer1.txt.",
+             "And from the spec you read earlier: how many days are audit logs retained on the Enterprise plan? "
+             "Write only the number to answer2.txt.",
          ],
          pause_s=330.0),
 ]

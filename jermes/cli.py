@@ -259,8 +259,8 @@ def cmd_ab(args) -> int:
     print(f"A/B: {len(names)} task(s) x 2 arms x {args.repeats} repeat(s) = {len(names) * 2 * args.repeats} agent runs")
     try:
         runs = ab.run_ab(names, args.repeats, points={"skill": args.skill_mode, "filt": args.filter_mode,
-                                                      "trim": args.trim_mode},
-                         timeout=args.timeout, out_path=out)
+                                                      "trim": args.trim_mode, "guards": args.guards_mode},
+                         timeout=args.timeout, out_path=out, parallel=args.parallel)
     except RuntimeError as exc:
         print(f"FAILED preflight: {exc}")
         return 1
@@ -449,6 +449,10 @@ class register_cli:  # namespace used by the plugin entry point
         p.add_argument("--filter-mode", default="enforce", choices=["off", "shadow", "advise", "enforce"])
         p.add_argument("--trim-mode", default="off", choices=["off", "shadow", "enforce"],
                        help="context trimming (also switches Hermes to the jermes context engine)")
+        p.add_argument("--parallel", type=int, default=0,
+                       help="concurrent agent runs (default: 1, or 8 for tasks with pauses); each needs ~200 MB")
+        p.add_argument("--guards-mode", default="shadow", choices=["off", "shadow"],
+                       help="risk_gate and loop_guard in the on arm (off isolates other points, saves Jev calls)")
         p.add_argument("--timeout", type=int, default=900, help="seconds per agent run")
         p.add_argument("--json", default=None, help="write every run (and a .summary.json) here")
         p = sub.add_parser("ingest", help="extract fields from documents; --bench compares against one model")

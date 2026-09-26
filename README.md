@@ -300,14 +300,14 @@ Latest results for each area. Earlier measurements and what each change did are 
 
 ### Context trimming (September 26, 2026)
 
-**Live A/B, one pair.** A four-turn Hermes session with a 5.5-minute pause before each follow-up (both arms), so the prompt cache really expires. Turn 1 reads three large files; later turns need details from them. Claude Opus 5.5, everything else in Jermes off.
+**Live A/B, 5 pairs.** Four-turn Hermes sessions with a 5.5-minute pause before each follow-up (both arms), so the prompt cache really expires. Turn 1 reads three large files; later turns need details from them. In the harder `recall` task those details are minor lines no summary would mention. Claude Opus 5.5, everything else in Jermes off.
 
-| | Correct | Cost |
+| | Correct | Cost (5 sessions) |
 |---|---|---|
-| Hermes alone | yes | $4.21 |
-| With context trimming | yes | **$2.86 (−32%)** |
+| Hermes alone | 5/5 | $19.83 |
+| With context trimming | 5/5 | **$12.05 (−39%)** |
 
-Jev trimmed six old file reads (293k characters). The agent answered the later questions from its own earlier summary, so this pair doesn't test a trimmed item being needed again. One pair is a first result, not a measurement of the average.
+Trimming was cheaper in every pair (−32% to −63%). When a later question needed a trimmed file, the agent searched it for the one line it needed rather than re-reading it. The tasks were built to exercise this feature and run-to-run noise is large; each pair and the caveats are in [docs/RESULTS.md](docs/RESULTS.md).
 
 **Offline estimate** (`hermes jermes costsim`, 13 real sessions, $746 of spend): −22% if Jev keeps 30% of old items, −33% if every old item is trimmed.
 
@@ -417,7 +417,7 @@ Modes: `off` → `shadow` (log only) → `advise` (notes and suggestions) → `e
 
 ```bash
 uv venv && uv pip install -e '.[dev]'
-pytest                                  # 164 tests, offline; Jev is faked at the HTTP layer
+pytest                                  # 165 tests, offline; Jev is faked at the HTTP layer
 HERMES_AGENT_DIR=~/hermes-agent pytest  # also runs the end-to-end test against a real Hermes checkout
 ```
 

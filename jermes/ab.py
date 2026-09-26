@@ -45,8 +45,8 @@ points:
   skill_suggest: {{mode: {skill}}}
   result_filter: {{mode: {filt}}}
   context_trim: {{mode: {trim}}}
-  risk_gate: {{mode: shadow}}
-  loop_guard: {{mode: shadow}}
+  risk_gate: {{mode: {guards}}}
+  loop_guard: {{mode: {guards}}}
   model_router: {{mode: off}}
 """
 
@@ -134,7 +134,7 @@ def _make_home(src: Path, arm: str, points: Dict[str, str]) -> Path:
         os.symlink(REPO, home / "plugins" / "jermes", target_is_directory=True)
         cfg["plugins"] = {"enabled": ["jermes"]}
         (home / "jermes").mkdir()
-        (home / "jermes" / "config.yaml").write_text(ON_CONFIG.format(**{"trim": "off", **points}))
+        (home / "jermes" / "config.yaml").write_text(ON_CONFIG.format(**{"trim": "off", "guards": "shadow", **points}))
         if points.get("trim", "off") != "off":
             cfg["context"] = {"engine": "jermes"}
     (home / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False))

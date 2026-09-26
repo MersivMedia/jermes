@@ -6,7 +6,32 @@ Setup for all runs: one real Hermes install (about 200 skills), Jev through Verc
 
 ## September 26, 2026: context trimming, routing ceiling, risk gate and loop guard
 
-### Context trimming: first live pair
+### Context trimming: 5 live pairs
+
+All runs use real 5.5-minute pauses in both arms, Claude Opus 5.5, and every other Jermes point off (for pairs 2 to 5, risk gate and loop guard off too), so the difference comes from trimming alone.
+
+Task `recall` is the hard case: turns 3 and 4 ask for minor details that no overview would include (a cache resize on line 278 of a 1,400-line log, and one retention figure in a 40-section spec). If Jev trims those file reads, the agent has to get the detail back itself.
+
+| Pair | Task | Off | On | Change | Correct (off/on) |
+|---|---|---|---|---|---|
+| 1 | session | $4.21 | $2.87 | −32% | yes / yes |
+| 2 | session | $4.42 | $2.97 | −33% | yes / yes |
+| 3 | recall | $2.70 | $1.74 | −36% | yes / yes |
+| 4 | recall | $4.24 | $1.56 | −63% | yes / yes |
+| 5 | recall | $4.26 | $2.91 | −32% | yes / yes |
+| **Total** | | **$19.83** | **$12.05** | **−39%** | 5/5, 5/5 |
+
+Jev's share of the "on" cost was under $0.01 in total.
+
+In the three "on" runs whose logs were inspected (pair 1 and two `recall` runs), Jev marked every old file read as no longer needed at the first pause (5 to 7 items, 125k to 293k characters), including the log that turn 3 asks about. In both `recall` runs the agent then searched the file for the one line it needed (`search_files` or `grep`, a few hundred characters back) instead of re-reading 1,400 lines. That took more calls (16 to 21 against 12 to 14), but each call carried a much smaller prompt, so it still cost less.
+
+What this does and doesn't show:
+
+- **Consistent direction:** trimming was cheaper in all five pairs, from −32% to −63%. Run-to-run noise is large (the same "off" task cost $2.70 once and $4.26 another time), so the average is less certain than the direction.
+- **Recoverable content only:** the trimmed files were still on disk and searchable. A task where old content can't be recovered (output of a command that can't be re-run, a web page that changed since) hasn't been tested.
+- **Tasks were built for this feature.** They show the mechanism works on long sessions with pauses; they aren't a sample of real use. The offline estimate over real sessions (below) is the better guide to typical savings.
+
+#### First live pair (detail)
 
 New A/B task `session`: four turns in one Hermes session, with a 5.5-minute pause before each follow-up so the provider's prompt cache really expires. Both arms pause.
 
@@ -26,7 +51,6 @@ Change: prompt tokens −19%, cost **−32%** (Jev's share: $0.001). The saving 
 
 At the turn-3 pause, Jev marked all six old items (293k characters: three file reads plus follow-up reads of the same files) as no longer needed. The agent still answered turns 3 and 4 correctly from its own turn-1 summary, without re-reading. So this pair doesn't test the harder case, where a trimmed item has to come back.
 
-Limits: one pair, and the task costs about $7 per pair.
 
 ### Cost simulation over real sessions (`hermes jermes costsim`)
 
