@@ -22,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
 from .engine import Engine, Verdict
-from .points import loop_guard, model_router, result_filter, risk_gate, skill_suggest
+from .points import loop_guard, model_router, result_filter, risk_gate, skill_overlap, skill_suggest
 
 logger = logging.getLogger("jermes")
 
@@ -49,6 +49,7 @@ class Harness:
         self._model: Dict[str, str] = {}          # last model requested per session (router cost check)
         self._prompt_tokens: Dict[str, int] = {}  # rough size of the last request
         self._last_llm: Dict[str, float] = {}     # time of the last request (cache warmth)
+        self._overlap_noted: set = set()          # (session, skill name) already advised
         self._route: Dict[str, str] = {}  # session_id -> cheap model for this turn
         self._roster: Optional[list] = None
         # Shadow-mode decisions are observed, never acted on, so they must not
@@ -208,6 +209,64 @@ class Harness:
 
     def on_pre_tool_call(self, tool_name: str = "", args: Optional[Dict[str, Any]] = None,
                          session_id: str = "", task_id: str = "", **kw: Any) -> Optional[Dict[str, Any]]:
+        if tool_name == "skill_manage":
+            note = self._skill_overlap(args or {}, session_id or task_id)
+            if note:
+                return note
+        return self._risk_gate(tool_name, args, session_id, task_id)
+
+    def _skill_overlap(self, args: Dict[str, Any], sid: str) -> Optional[Dict[str, Any]]:
+        """Before skill_manage create: does an existing skill already cover this?
+
+        advise/enforce return a block whose message tells the agent which
+        skill overlaps and to extend it or confirm the new one is distinct.
+        Shown once per (session, skill name): the same create retried goes
+        through, so the agent (or the user) always has the last word.
+        """
+        point = skill_overlap.POINT
+        try:
+            target = skill_overlap.target_from_create(args)
+            if target is None or not self.engine.enabled(point):
+                return None
+            key = (sid, target.name)
+            if key in self._overlap_noted:
+                return None
+            cfg = self.engine.point_config(point)
+            mode = self.engine.mode(point)
+            roster = self.roster()
+
+            def run() -> Optional[str]:
+                matches, err = skill_overlap.find_matches(
+                    self.engine, target, roster, top_k=int(cfg.get("top_k", 4)),
+                    sources=skill_overlap.skill_sources(roster), session_id=sid,
+                    deadline_s=float(cfg.get("deadline_s", 12.0)))
+                if err:
+                    return None
+                note = skill_overlap.create_note(target, matches, float(cfg.get("threshold", 0.7)))
+                self.engine.store.log(
+                    session_id=sid, point=point, mode=mode, spec_version=skill_overlap.SPEC_VERSION,
+                    policy_version="", model=self.engine.client.model, state_hash="", answers_json="{}",
+                    action="overlap" if note else "distinct", applied=int(bool(note) and mode != "shadow"),
+                    cached=0, latency_ms=0.0, input_tokens=0, error=None,
+                    detail_json=json.dumps({"skill": target.name,
+                                            "matches": [m.__dict__ for m in matches]}))
+                return note
+
+            if mode == "shadow":
+                self._shadow_pool.submit(run)
+                return None
+            note = run()
+            if not note:
+                return None
+            with self._lock:
+                self._overlap_noted.add(key)
+            return {"action": "block", "message": note}
+        except Exception:
+            logger.debug("jermes skill_overlap failed", exc_info=True)
+            return None
+
+    def _risk_gate(self, tool_name: str, args: Optional[Dict[str, Any]], session_id: str,
+                   task_id: str) -> Optional[Dict[str, Any]]:
         point = "risk_gate"
         try:
             cfg = self.engine.point_config(point)

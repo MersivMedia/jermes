@@ -161,7 +161,7 @@ class JevClient:
             payload["providerOptions"] = {"gateway": {"zeroDataRetention": True}}
         return payload
 
-    def ask(self, state: Any, questions: Mapping[str, Question]) -> JevResponse:
+    def ask(self, state: Any, questions: Mapping[str, Question], *, deadline_s: Optional[float] = None) -> JevResponse:
         cfg = self.config.resolved()
         if not cfg["api_key"]:
             raise JevError(f"{cfg['api_key_env']} is not set", kind="config")
@@ -169,7 +169,7 @@ class JevClient:
         url = f"{cfg['base_url']}/v1/systemone"
         headers = {"Authorization": f"Bearer {cfg['api_key']}", "Content-Type": "application/json"}
 
-        deadline = time.monotonic() + self.config.deadline_s
+        deadline = time.monotonic() + (deadline_s if deadline_s is not None else self.config.deadline_s)
         start: Optional[float] = None
         attempt = 0
         while True:

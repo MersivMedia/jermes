@@ -102,6 +102,7 @@ Jermes uses only public Hermes plugin surfaces. It needs no core patches and nev
 | `result_filter` | D5 | `transform_tool_result` hook | Drops irrelevant sections of big tool results before the model re-reads them every turn. |
 | `loop_guard` | D6 | `transform_tool_result` hook | Adds a one-line note when a failed call is repeated or the task already looks done. |
 | `model_router` | D7 | `llm_request` middleware | Sends confidently easy, low-stakes turns to a cheaper model, sticky for the whole turn. A cost check refuses the switch when the conversation won't fit the cheaper model or rewriting the prompt cache would cost more than the turn saves. |
+| `skill_overlap` | - | `pre_tool_call` on `skill_manage` create | Before a new skill is written, checks whether an existing skill already covers the same job. If one does, the agent is told which and asked to extend it or confirm the new one is distinct; the same create retried goes through. `hermes jermes skills-audit` runs the same check across the library and suggests merges (suggestions only). |
 | `context_trim` | X3 | context engine (`context: {engine: jermes}`) | After a pause long enough for the prompt cache to expire, Jev scores old tool traffic: "will this still be needed?" Items it drops are replaced by one-line stubs pointing to the full text on disk. See [Context trimming](#context-trimming). |
 | `ingest` | I2 to I9 | `hermes jermes ingest` (explicit, not a hook) | Extracts fields from documents: code finds candidates, Jev picks, code copies. Only flagged fields reach a strong model. See [Data ingestion](#data-ingestion). |
 
@@ -210,6 +211,7 @@ hermes jermes ingest    # extract fields from documents; --bench compares agains
 hermes jermes savings   # estimate tokens and dollars Jermes would have saved on your sessions
 hermes jermes ab        # run fixed tasks with Jermes off and on; compare Hermes' own costs
 hermes jermes costsim   # price past sessions with context trimming applied (offline)
+hermes jermes skills-audit  # find overlapping installed skills and suggest merges (changes nothing)
 hermes jermes riskbench # score the risk gate on labelled cases and real past calls
 hermes jermes loopbench # score the loop guard on real repeated failures
 hermes jermes stats     # decisions, cache hits, latency, tokens per point
@@ -382,6 +384,7 @@ Caveats:
 - **Vercel rate limits.** A new Vercel account allowed 30 requests per window. Skill selection makes two calls per request. Normal use, with pauses while you read replies, should stay under that; back-to-back automation will not.
 - **Vercel 503s.** During testing, up to about 20% of calls got a temporary 503 from the gateway. Live hooks fail open (Hermes carries on unchanged); replay retries.
 - **OpenRouter is untested live.** The request format matches OpenRouter's documentation and is covered by tests, but no live call has been made with an OpenRouter key yet.
+- **`skill_overlap` is untested live.** It has offline tests only; Vercel began refusing Jev on the free tier (HTTP 403) before a live run.
 - **Latency.** The risk gate took 243 ms at the median and 340 ms at the 90th percentile over 100 real calls. Skill selection makes two calls in sequence.
 - **Scored so far:** skill selection (hand labels), `result_filter` (A/B cost, mixed results), ingestion (SEC benchmark), `risk_gate` (31 labelled cases and 100 real calls) and `loop_guard` (real repeated failures). `model_router` has a cost check but no measured results.
 - **Routing saves little on long, judgment-heavy sessions.** On one install, Jev rated 5 of 137 turns after a pause as easy enough for a cheaper model, and none of 88 long tool loops as safe to hand to a cheap worker. Context trimming is where that install's savings are.
@@ -417,7 +420,7 @@ Modes: `off` → `shadow` (log only) → `advise` (notes and suggestions) → `e
 
 ```bash
 uv venv && uv pip install -e '.[dev]'
-pytest                                  # 165 tests, offline; Jev is faked at the HTTP layer
+pytest                                  # 176 tests, offline; Jev is faked at the HTTP layer
 HERMES_AGENT_DIR=~/hermes-agent pytest  # also runs the end-to-end test against a real Hermes checkout
 ```
 

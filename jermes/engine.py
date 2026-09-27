@@ -159,7 +159,7 @@ class Engine:
 
     # -- core ---------------------------------------------------------------
 
-    def _ask_cached(self, state: Any, questions: Mapping[str, Question]) -> tuple:
+    def _ask_cached(self, state: Any, questions: Mapping[str, Question], deadline_s: Optional[float] = None) -> tuple:
         wire = questions_to_wire(questions)
         model = self.client.model
         key = cache_key(model, state, wire)
@@ -167,7 +167,8 @@ class Engine:
         if hit is not None:
             answers = {qid: parse_answer(a) for qid, a in hit["answers"].items()}
             return answers, hit.get("model", model), True, 0.0, 0
-        resp: JevResponse = self.client.ask(state, questions)
+        resp: JevResponse = (self.client.ask(state, questions, deadline_s=deadline_s) if deadline_s is not None
+                             else self.client.ask(state, questions))
         self.store.cache_put(
             key,
             resp.model,
@@ -185,6 +186,7 @@ class Engine:
         session_id: str = "",
         spec_version: str = "1",
         log_detail: Optional[Dict[str, Any]] = None,
+        deadline_s: Optional[float] = None,
     ) -> Decision:
         mode = self.mode(point)
         if mode == "off":
@@ -198,7 +200,9 @@ class Engine:
         verdict: Optional[Verdict] = None
         error: Optional[str] = None
         try:
-            answers, model, cached, latency, tokens = self._ask_cached(state, questions)
+            answers, model, cached, latency, tokens = (self._ask_cached(state, questions, deadline_s)
+                                                       if deadline_s is not None
+                                                       else self._ask_cached(state, questions))
             verdict = policy(answers)
         except JevError as exc:
             error = f"{exc.kind}: {exc}"

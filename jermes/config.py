@@ -101,6 +101,14 @@ DEFAULTS: Dict[str, Any] = {
             "excerpt_chars": 700,
             "request_chars": 60000,
         },
+        # Skill overlap: check skill_manage create against existing skills; also
+        # used by `hermes jermes skills-audit`. advise = note once per name, retry goes through.
+        "skill_overlap": {
+            "mode": "shadow",
+            "threshold": 0.7,         # Jev's "same job" at or above this counts as overlap
+            "top_k": 4,               # shortlisted existing skills judged side by side
+            "deadline_s": 12.0,       # two sequential Jev calls; well under Hermes' 30 s hook timeout
+        },
         # Ingestion pipeline (explicit tool/CLI, not a hook). Jev only picks
         # among candidates code found; it never writes values.
         "ingest": {

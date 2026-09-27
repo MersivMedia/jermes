@@ -12,6 +12,7 @@
     riskbench  score the risk gate on labelled cases and on real past tool calls
     loopbench  score the loop guard's repeat-failure check on real past sessions
     costsim  price your past sessions under context trimming (offline, no Jev calls)
+    skills-audit  find overlapping installed skills and suggest merges (suggestions only)
     stats    decisions per point and mode, cache hits, latency, tokens
     recent   last N logged decisions
 """
@@ -356,6 +357,32 @@ def cmd_loopbench(args) -> int:
     return 0
 
 
+def cmd_skills_audit(args) -> int:
+    from . import skill_audit
+    from .points import skill_suggest
+
+    roster = skill_suggest.load_roster()
+    if len(roster) < 2:
+        print("fewer than two skills found")
+        return 1
+    eng = _batch_engine(interval_s=args.interval)
+    if eng.mode("skill_overlap") == "off":
+        eng.config["points"]["skill_overlap"]["mode"] = "shadow"
+    if not eng.client.available():
+        print("no Jev key configured (see `hermes jermes status`)")
+        return 1
+    scope_n = sum(1 for _ in roster) if args.scope == "all" else None
+    print(f"{len(roster)} skills installed; checking {'all' if scope_n else 'local (agent-created)'} skills "
+          f"against the whole library. About 2 Jev requests per skill.")
+    report = skill_audit.audit(eng, roster, scope=args.scope, threshold=args.threshold, top_k=args.top_k,
+                               limit=args.limit)
+    print(skill_audit.render(report))
+    if args.json:
+        Path(args.json).write_text(json.dumps(report, indent=2))
+        print(f"full report: {args.json}")
+    return 0
+
+
 def cmd_costsim(args) -> int:
     from . import costsim
     from .replay import default_db
@@ -477,6 +504,14 @@ class register_cli:  # namespace used by the plugin entry point
         p.add_argument("--db", default=None)
         p.add_argument("--interval", type=float, default=2.1)
         p.add_argument("--json", default=None)
+        p = sub.add_parser("skills-audit", help="find overlapping installed skills and suggest merges")
+        p.add_argument("--scope", default="local", choices=["local", "all"],
+                       help="which skills to check (each is compared against the whole library)")
+        p.add_argument("--threshold", type=float, default=0.7)
+        p.add_argument("--top-k", type=int, default=4)
+        p.add_argument("--limit", type=int, default=0, help="check only the first N skills (for a trial run)")
+        p.add_argument("--interval", type=float, default=2.1, help="seconds between Jev requests (rate limits)")
+        p.add_argument("--json", default=None)
         p = sub.add_parser("costsim", help="price past sessions under context trimming (offline)")
         p.add_argument("--db", default=None)
         p.add_argument("--keep", type=float, default=0.3, help="fraction of old items assumed kept by Jev")
@@ -491,7 +526,8 @@ class register_cli:  # namespace used by the plugin entry point
     def handle(args: Any) -> int:
         cmd = getattr(args, "jermes_cmd", None) or "status"
         return {"status": cmd_status, "stats": cmd_stats, "recent": cmd_recent, "check": cmd_check,
-                "rank": cmd_rank, "replay": cmd_replay, "label": cmd_label, "score": cmd_score, "savings": cmd_savings, "ab": cmd_ab, "ingest": cmd_ingest, "riskbench": cmd_riskbench, "loopbench": cmd_loopbench, "costsim": cmd_costsim}[cmd](args)
+                "rank": cmd_rank, "replay": cmd_replay, "label": cmd_label, "score": cmd_score, "savings": cmd_savings, "ab": cmd_ab, "ingest": cmd_ingest, "riskbench": cmd_riskbench, "loopbench": cmd_loopbench, "costsim": cmd_costsim,
+                "skills-audit": cmd_skills_audit}[cmd](args)
 
 
 def main(argv: Optional[List[str]] = None) -> int:
