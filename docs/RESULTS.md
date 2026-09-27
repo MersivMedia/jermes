@@ -4,6 +4,25 @@ Every measurement so far, newest first. The [README](../README.md) shows only th
 
 Setup for all runs: one real Hermes install (about 200 skills), Jev through Vercel AI Gateway, real past turns replayed from Hermes' `state.db`. Metric definitions are in the README under "Score the results".
 
+## September 27, 2026: duplicate-skill audit (live)
+
+`hermes jermes skills-audit` over one install: 95 agent-created skills, each compared against all 207 installed skills. 207 Jev requests (976k Jev input tokens, $0.041), 349 seconds, 0 errors.
+
+Method per skill: one Choice over the whole library shortlists up to four candidates; one request then judges each pair side by side: "same job?", "could one skill serve both?", and the relation (duplicate / contains / partial / related / unrelated). A pair counts when "same job" is at least 0.7 and the relation is duplicate or contains, or partial with "one serves both" at least 0.5.
+
+| Group | Pairs (same job) | Human review | Outcome |
+|---|---|---|---|
+| archival-corpus-ingestion, document-corpus-ingestion, corpus-ingestion-architecture | 78%, 75%, 71%, 70% | Descriptions nearly identical | Merged; 28 distinct points checked present afterwards |
+| costed-decision-proposals, decision-proposal-modeling | 79%, 78% | Same job | Merged |
+| template-based-ai-tool-development, Clone Working AI Tool Structure | 85%, 76% | One contains the other | Merged |
+| Vercel Deployment Fixes, AI Tool Deployment Troubleshooting & Recovery | 72% (partial) | Overlapping, not identical | Merged, but into the broader skill, not the one suggested |
+
+Near misses (55–69%), all judged related but distinct: `guidance`/`outlines` 66%, `find-nearby`/`maps` 63%, the two legal-template AI tool skills 57–62%. It correctly left `cia-crest-archive` (one specific archive) out of the corpus-ingestion group.
+
+After merging, the same check on the four surviving skills found no overlap; the closest match to any of them was 28%.
+
+Not measured: recall. There is no labelled list of true duplicates, so pairs Jev missed entirely are unknown. `skill_overlap` (the pre-create check) runs in shadow on the same install and has not yet seen a real skill creation.
+
 ## September 26, 2026: context trimming, routing ceiling, risk gate and loop guard
 
 ### Context trimming: 5 live pairs

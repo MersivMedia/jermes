@@ -14,7 +14,7 @@ Jev only supplies the judgment. Code owns the policy: thresholds you can read de
 
 The design, the evidence behind it, and the rollout plan are in the **[PRD](docs/PRD.md)**.
 
-> **Status: v0.5, Phase 0 (shadow mode).** Every decision point ships in `shadow`. Jermes calls Jev and logs what it *would* do, but changes nothing in Hermes until you promote a point. Context trimming also needs `context: {engine: jermes}` in Hermes' config.yaml.
+> **Status: v0.6, Phase 0 (shadow mode).** Every decision point ships in `shadow`. Jermes calls Jev and logs what it *would* do, but changes nothing in Hermes until you promote a point. Context trimming also needs `context: {engine: jermes}` in Hermes' config.yaml.
 >
 > Latest measurements (details in [Test results](#test-results)):
 > - **Ingestion:** on 16 SEC 10-K filings not used during development, the Jev pipeline matched a strong model on every value (94/94) at **11x lower cost**, sending 94% fewer tokens to the strong model.
@@ -313,6 +313,19 @@ Trimming was cheaper in every pair (−32% to −63%). When a later question nee
 
 **Offline estimate** (`hermes jermes costsim`, 13 real sessions, $746 of spend): −22% if Jev keeps 30% of old items, −33% if every old item is trimmed.
 
+### Duplicate skills (September 27, 2026)
+
+`hermes jermes skills-audit` checked the 95 agent-created skills on one install against all 207 installed skills: 207 Jev requests, $0.04, 6 minutes. It found four groups:
+
+| Group | Jev's verdict | What happened |
+|---|---|---|
+| Three corpus-ingestion skills with near-identical descriptions | duplicate / one contains another (71–78%) | Merged into one |
+| Two cost/timeline proposal skills | duplicate (79%) | Merged |
+| Two "clone a working AI tool" skills | one contains the other (85%) | Merged |
+| Vercel build fixes and AI tool deploy troubleshooting | partial overlap (72%) | Merged into the broader one; the suggested keeper was the narrower skill, so a human overrode it |
+
+It held back on close calls under 70% that are related but distinct (`guidance`/`outlines`, `find-nearby`/`maps`). Each merge was reviewed by hand before editing; afterwards, a re-run on the four merged skills found nothing above 28%. The keeper rule (bundled first, then the skill that contains the others, then the longest) got one group of four wrong, which is why the command only suggests.
+
 ### Risk gate (September 26, 2026)
 
 31 labelled cases and 100 real past calls: every dangerous case was stopped, every safe case was allowed, and 15% of real calls went to review, with none blocked. Latency: 257 ms at the median. Details and the before/after table are in [docs/RESULTS.md](docs/RESULTS.md).
@@ -384,7 +397,6 @@ Caveats:
 - **Vercel rate limits.** A new Vercel account allowed 30 requests per window. Skill selection makes two calls per request. Normal use, with pauses while you read replies, should stay under that; back-to-back automation will not.
 - **Vercel 503s.** During testing, up to about 20% of calls got a temporary 503 from the gateway. Live hooks fail open (Hermes carries on unchanged); replay retries.
 - **OpenRouter is untested live.** The request format matches OpenRouter's documentation and is covered by tests, but no live call has been made with an OpenRouter key yet.
-- **`skill_overlap` is untested live.** It has offline tests only; Vercel began refusing Jev on the free tier (HTTP 403) before a live run.
 - **Latency.** The risk gate took 243 ms at the median and 340 ms at the 90th percentile over 100 real calls. Skill selection makes two calls in sequence.
 - **Scored so far:** skill selection (hand labels), `result_filter` (A/B cost, mixed results), ingestion (SEC benchmark), `risk_gate` (31 labelled cases and 100 real calls) and `loop_guard` (real repeated failures). `model_router` has a cost check but no measured results.
 - **Routing saves little on long, judgment-heavy sessions.** On one install, Jev rated 5 of 137 turns after a pause as easy enough for a cheaper model, and none of 88 long tool loops as safe to hand to a cheap worker. Context trimming is where that install's savings are.
@@ -440,6 +452,7 @@ The end-to-end tests run against a real Hermes checkout in a temporary `HERMES_H
 - [x] First 40 hand labels; context set to 10 messages; first skill-description fix
 - [ ] Blind labelling batch (Jev's answer hidden) and 100+ labels; tune `fits_threshold`
 - [ ] OpenRouter live test
+- [x] Duplicate-skill audit and a check before new skills are created (`skill_overlap`); first live audit merged 4 groups
 - [x] Token-savings measurement: offline estimate over real sessions and task-matched A/B through real Hermes
 - [x] Data-ingestion pipeline (PRD §6): triage, screening, select-don't-generate extraction, verify-then-escalate; SEC benchmark
 - [x] Filtered results: line ranges of what was cut, full copy on disk, targeted reads never filtered, "needs the whole thing" pass-through
@@ -448,6 +461,7 @@ The end-to-end tests run against a real Hermes checkout in a temporary `HERMES_H
 - [ ] Harder ingestion benchmark (scanned documents, ambiguous fields); request intake (I1); parallel Jev requests
 - [x] Score `risk_gate` and `loop_guard`; protected-path rule for config and credential files
 - [ ] Phase 1 to 2: promote `result_filter`, `skill_suggest`, `risk_gate`
+- [ ] Context trimming: two weeks of live shadow logs, then a `trimreport` (would-be-trimmed items the agent later needed) before enforce
 - [ ] Workstream 3 extras (PRD §7): gateway triage, cron wake gating, memory filter, citation checks
 - [ ] Cross-provider routing via `llm_execution` middleware
 
