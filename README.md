@@ -1,25 +1,27 @@
 # Jermes - Jev decision layer for Hermes Agent
 
-Jermes is a [Hermes Agent](https://github.com/NousResearch/hermes-agent) plugin that takes the small, bounded decisions an agent makes all the time out of the expensive reasoning model:
+Jermes is a [Hermes Agent](https://github.com/NousResearch/hermes-agent) plugin that takes the small, bounded decisions an agent makes all the time out of the expensive reasoning model, and uses them to cut what the agent spends.
 
-- Which of my 200 skills does this request need?
-- Is this tool call dangerous?
-- Which parts of this web page matter?
-- Is the agent going in circles?
-- Does this turn even need the big model?
+Plain code makes each decision by asking [Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev), TypeSafe AI's System One model, which returns typed answers with probabilities for $0.042 per million input tokens. Jev only supplies the judgment. Code owns the policy: thresholds you can read decide whether to act, ask a human, or leave Hermes alone.
 
-Plain code makes each of those decisions by consulting [Jev](https://typesafe.ai/blog/introducing-system-one-models-and-jev), TypeSafe AI's System One model. Jev returns typed answers with probabilities for $0.042 per million input tokens.
+## What it does
 
-Jev only supplies the judgment. Code owns the policy: thresholds you can read decide whether to act, ask a human, or leave Hermes alone.
+| Feature | What Jev decides | Latest result |
+|---|---|---|
+| **[Context trimming](#context-trimming)** | After a pause, which old tool results and file reads are no longer needed; those become one-line stubs with the full text saved on disk | **−39% agent cost** over 5 live A/B sessions, every answer still correct. Offline estimate on 13 real sessions: −22% to −33% |
+| **[Skill selection](#skill-selection)** | Which of 200+ skills a request needs, or none | Right first skill on 72% of 40 hand-labelled real turns (the agent alone: 7%) |
+| **Duplicate skills** | Before a new skill is created, whether an existing one already covers it; `skills-audit` checks the whole library | First live audit of 95 skills found 4 duplicate groups for $0.04; all merged after review |
+| **Risk gate** | Whether a tool call is dangerous or not what the user asked; writes to config and credential files always go to review | Every dangerous test case stopped, every safe one allowed; 15% of 100 real calls sent to review, none blocked; 257 ms |
+| **Tool-result filter** | Which sections of a long result matter for the task | Mixed: −10% prompt tokens but +5% cost in the latest A/B, because the agent sometimes re-reads what was cut |
+| **Loop guard** | Whether the agent is repeating a failed step | Catches 31% of real repeated failures at 5% false alarms; stays in shadow |
+| **Model router** | Whether a turn is easy enough for a cheaper model; a cost check refuses switches that would cost more after cache effects | Not yet A/B tested. On one install, under 1% of spend was routable |
+| **[Data ingestion](#data-ingestion)** | Which code-found candidate is each field's value, and whether to escalate to a strong model | 94/94 correct on held-out SEC filings at **11× lower cost** than a strong model reading every document |
+
+Every result, with methods and caveats, is in [Test results](#test-results) and the dated history in [docs/RESULTS.md](docs/RESULTS.md). Measurement tools ship with the plugin: `savings`, `costsim` and `ab` for token cost, `riskbench` and `loopbench` for the guards, `skills-audit` for the skill library.
 
 The design, the evidence behind it, and the rollout plan are in the **[PRD](docs/PRD.md)**.
 
-> **Status: v0.6, Phase 0 (shadow mode).** Every decision point ships in `shadow`. Jermes calls Jev and logs what it *would* do, but changes nothing in Hermes until you promote a point. Context trimming also needs `context: {engine: jermes}` in Hermes' config.yaml.
->
-> Latest measurements (details in [Test results](#test-results)):
-> - **Ingestion:** on 16 SEC 10-K filings not used during development, the Jev pipeline matched a strong model on every value (94/94) at **11x lower cost**, sending 94% fewer tokens to the strong model.
-> - **Skill selection:** on 40 hand-labelled real turns, Jev names a correct first skill 72% of the time; the agent on its own did so 7% of the time.
-> - **Tool-result filtering:** on tasks that read long files, it cut agent cost by 33% on one task and cost 5% more on the other.
+> **Status: v0.6, Phase 0 (shadow mode).** Every decision point ships in `shadow`: Jermes calls Jev and logs what it *would* do, but changes nothing in Hermes until you promote a point. Context trimming also needs `context: {engine: jermes}` in Hermes' main config file.
 
 ## Quick start
 
