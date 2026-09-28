@@ -29,6 +29,13 @@ def register(ctx) -> None:
         ctx.register_middleware("llm_request", h.llm_request_middleware)
     except Exception:  # older Hermes without middleware: routing just stays off
         logger.debug("jermes: llm_request middleware unavailable", exc_info=True)
+    try:
+        # Pre-tool decisions are made here so the pre_tool_call hook returns at
+        # once; without it, concurrent sessions collide on Hermes' per-callback
+        # "still running" guard and tool calls get refused.
+        ctx.register_middleware("tool_request", h.tool_request_middleware)
+    except Exception:  # older Hermes: the hook decides inline, as before
+        logger.debug("jermes: tool_request middleware unavailable", exc_info=True)
 
     # Context engine (context trimming). Registering only makes it selectable:
     # Hermes uses it when config.yaml has `context: {engine: jermes}`.

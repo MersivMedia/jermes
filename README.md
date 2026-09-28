@@ -24,7 +24,7 @@ Every result, with methods and caveats, is in [Test results](#test-results) and 
 
 The design, the evidence behind it, and the rollout plan are in the **[PRD](docs/PRD.md)**.
 
-> **Status: v1.1.** Every decision point ships in `shadow`: Jermes calls Jev and logs what it *would* do, but changes nothing in Hermes until you promote a point (from the dashboard tab or the config file). The first install running every point in `enforce` has done so since September 28; see the risk gate section for what that turned up. Context trimming also needs `context: {engine: jermes}` in Hermes' main config file.
+> **Status: v1.1.1.** Every decision point ships in `shadow`: Jermes calls Jev and logs what it *would* do, but changes nothing in Hermes until you promote a point (from the dashboard tab or the config file). The first install running every point in `enforce` has done so since September 28; see the risk gate section for what that turned up. Context trimming also needs `context: {engine: jermes}` in Hermes' main config file.
 
 ## Quick start
 
@@ -460,6 +460,7 @@ Caveats:
 
 ## Known issues and limits
 
+- **Concurrent sessions on older Hermes builds (fixed in v1.1.1 for realistic timing).** Hermes builds before upstream commit `4121aa295a` (September 14, 2026) keep one "still running" slot per `pre_tool_call` callback across all sessions and refuse the tool call (*"pre_tool_call plugin callback timed out or is still running"*) when a second session's check starts while the first is still waiting on Jev. Jermes now makes the decision in `tool_request` middleware, which has no such slot, and the hook only looks it up. On such a build: realistic overlap 4/90 refused (v1.1) → 0/90 (v1.1.1); hooks fired at the exact same instant still collide (23/60, was 40/60). Current Hermes gates by call identity and refuses none either way; updating Hermes removes the residual case. A pre-tool decision that takes longer than 20 s now fails open instead of hitting Hermes' 30 s fail-closed timeout.
 - **Vercel rate limits.** A new Vercel account allowed 30 requests per window. Skill selection makes two calls per request. Normal use, with pauses while you read replies, should stay under that; back-to-back automation will not.
 - **Vercel 503s.** During testing, up to about 20% of calls got a temporary 503 from the gateway. Live hooks fail open (Hermes carries on unchanged); replay retries.
 - **OpenRouter is untested live.** The request format matches OpenRouter's documentation and is covered by tests, but no live call has been made with an OpenRouter key yet.

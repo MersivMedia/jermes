@@ -70,6 +70,16 @@ class Harness:
         # add latency to the agent loop: run them off-thread.
         self._shadow_pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix="jermes-shadow")
         self.background_shadow = True
+        # Pre-tool decisions computed in tool_request middleware, handed to the
+        # pre_tool_call hook. Hermes refuses a pre_tool_call callback that is
+        # already running for *another* tool call (one "still running" slot per
+        # callback, across all sessions), so with two sessions active a normal
+        # 0.3 s Jev call made the second session's tool call fail. Middleware
+        # has no such slot; the hook then only does a dictionary lookup.
+        self._decided: Dict[tuple, tuple] = {}     # key -> (time, directive or None)
+        self._decide_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="jermes-pretool")
+        self.precompute_ttl_s = 120.0
+        self.pre_tool_budget_s = 20.0              # under Hermes' 30 s hook timeout; then fail open
 
     def _shadow(self, point: str, *args: Any, **kwargs: Any) -> bool:
         """If ``point`` is in shadow mode, evaluate it in the background and return True."""
@@ -221,8 +231,69 @@ class Harness:
 
     # ------------------------------------------------------------------ tools
 
+    @staticmethod
+    def _decision_key(session_id: str, task_id: str, tool_call_id: str, tool_name: str,
+                      args: Optional[Dict[str, Any]]) -> tuple:
+        sid = session_id or task_id or ""
+        if tool_call_id:
+            return (sid, "id", tool_call_id)
+        try:
+            blob = json.dumps(args or {}, sort_keys=True, ensure_ascii=False, default=str)
+        except Exception:
+            blob = repr(args)
+        import hashlib
+
+        return (sid, "args", tool_name, hashlib.sha256(blob.encode()).hexdigest()[:24])
+
+    def tool_request_middleware(self, tool_name: str = "", args: Optional[Dict[str, Any]] = None,
+                                session_id: str = "", task_id: str = "", tool_call_id: str = "",
+                                **kw: Any) -> None:
+        """Decide the pre-tool verdict here, before Hermes' pre_tool_call hook runs.
+
+        Never rewrites arguments (always returns None). A decision that takes
+        longer than ``pre_tool_budget_s`` fails open, like a Jev error does.
+        """
+        try:
+            if not tool_name:
+                return None
+            fut = self._decide_pool.submit(self._decide_pre_tool, tool_name, args, session_id, task_id)
+            try:
+                directive = fut.result(timeout=self.pre_tool_budget_s)
+            except Exception:
+                logger.warning("jermes: pre-tool decision for %s exceeded %.0fs or failed; allowing (fail open)",
+                               tool_name, self.pre_tool_budget_s)
+                directive = None
+            now = time.monotonic()
+            with self._lock:
+                self._decided[self._decision_key(session_id, task_id, tool_call_id, tool_name, args)] = (now, directive)
+                if len(self._decided) > 512:
+                    for k, (ts, _) in list(self._decided.items()):
+                        if now - ts > self.precompute_ttl_s:
+                            self._decided.pop(k, None)
+        except Exception:
+            logger.debug("jermes tool_request middleware failed", exc_info=True)
+        return None
+
     def on_pre_tool_call(self, tool_name: str = "", args: Optional[Dict[str, Any]] = None,
-                         session_id: str = "", task_id: str = "", **kw: Any) -> Optional[Dict[str, Any]]:
+                         session_id: str = "", task_id: str = "", tool_call_id: str = "",
+                         **kw: Any) -> Optional[Dict[str, Any]]:
+        try:
+            now = time.monotonic()
+            keys = [self._decision_key(session_id, task_id, tool_call_id, tool_name, args)]
+            if tool_call_id:                     # another plugin's middleware may not pass the id through
+                keys.append(self._decision_key(session_id, task_id, "", tool_name, args))
+            with self._lock:
+                for k in keys:
+                    hit = self._decided.pop(k, None)
+                    if hit is not None and now - hit[0] <= self.precompute_ttl_s:
+                        return hit[1]
+        except Exception:
+            logger.debug("jermes precomputed lookup failed", exc_info=True)
+        # No middleware on this path (older Hermes, or a caller that skips it): decide inline.
+        return self._decide_pre_tool(tool_name, args, session_id, task_id)
+
+    def _decide_pre_tool(self, tool_name: str, args: Optional[Dict[str, Any]], session_id: str,
+                         task_id: str) -> Optional[Dict[str, Any]]:
         if tool_name == "skill_manage":
             note = self._skill_overlap(args or {}, session_id or task_id)
             if note:

@@ -4,6 +4,20 @@ Every measurement so far, newest first. The [README](../README.md) shows only th
 
 Setup for all runs: one real Hermes install (about 200 skills), Jev through Vercel AI Gateway, real past turns replayed from Hermes' `state.db`. Metric definitions are in the README under "Score the results".
 
+## September 28, 2026 (v1.1.1): concurrent-session refusals
+
+Live: twice in ~10 minutes a `skill_manage` call was refused with *"pre_tool_call plugin callback timed out or is still running"*. No Jermes decision had taken long (per-question p50 289 ms, max 1.1 s over 323 calls). Cause: the installed Hermes (a checkout from before upstream `4121aa295a`, September 14) keeps one "still running" slot per `pre_tool_call` callback **across all sessions** and fails closed when a second call arrives while the first is in the callback. With three active sessions and a ~0.3 s Jev call, collisions happen. Reproduced in isolation with a plugin that only sleeps 0.6 s: the second session's call is refused on the old build.
+
+Fix: Jermes decides in `tool_request` middleware (plugin middleware has no running-slot guard; Hermes calls it just before the hook with the same `session_id` / `tool_call_id`), stores the verdict, and the hook returns it from a dictionary. The middleware bounds a decision at 20 s and fails open, below Hermes' 30 s fail-closed hook timeout. Without the middleware (older Hermes, other call paths) the hook decides inline as before.
+
+| Refused tool calls, 3 sessions, Jev 0.3 s | v1.1 | v1.1.1 |
+|---|---|---|
+| Installed Hermes, realistic (random 0–400 ms overlap), 90 calls | 4 | **0** |
+| Installed Hermes, worst case (hooks released at the same instant), 60 calls | 40 | 23 |
+| Current Hermes main, either case | 0 | 0 |
+
+The worst case remains because the old gate still refuses hooks that start within the same few milliseconds; updating Hermes removes it. New tests: an end-to-end concurrency test through Hermes' real plugin manager and middleware (fails on v1.1, passes on v1.1.1), and unit tests for decision reuse, the no-middleware path, and the fail-open budget.
+
 ## September 28, 2026 (v1.1): first live enforce, risk-gate false blocks
 
 The first install switched every point to `enforce` from the dashboard. In the next ~25 minutes of real use (two sessions) Jermes logged 162 decisions with no errors; risk-gate latency p50 312 ms, p90 448 ms.
