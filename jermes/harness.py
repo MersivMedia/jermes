@@ -22,7 +22,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional
 
 from .engine import Engine, Verdict
-from .points import loop_guard, model_router, result_filter, risk_gate, skill_overlap, skill_suggest
+from .points import loop_guard, memory_filter, model_router, result_filter, risk_gate, skill_overlap, skill_suggest
 
 logger = logging.getLogger("jermes")
 
@@ -50,6 +50,7 @@ class Harness:
         self._prompt_tokens: Dict[str, int] = {}  # rough size of the last request
         self._last_llm: Dict[str, float] = {}     # time of the last request (cache warmth)
         self._overlap_noted: set = set()          # (session, skill name) already advised
+        self._memory_noted: set = set()           # (session, content hash) already held once
         self._route: Dict[str, str] = {}  # session_id -> cheap model for this turn
         self._roster: Optional[list] = None
         # Shadow-mode decisions are observed, never acted on, so they must not
@@ -213,7 +214,53 @@ class Harness:
             note = self._skill_overlap(args or {}, session_id or task_id)
             if note:
                 return note
+        if tool_name == "memory":
+            note = self._memory_filter(args or {}, session_id or task_id)
+            if note:
+                return note
         return self._risk_gate(tool_name, args, session_id, task_id)
+
+    def _memory_filter(self, args: Dict[str, Any], sid: str) -> Optional[Dict[str, Any]]:
+        """Hold memory writes that read as task progress or long procedures (once)."""
+        point = memory_filter.POINT
+        try:
+            writes = memory_filter.writes_in(args)
+            if not writes or not self.engine.enabled(point):
+                return None
+            import hashlib
+
+            key = (sid, hashlib.sha256(json.dumps(writes, sort_keys=True).encode()).hexdigest()[:16])
+            if key in self._memory_noted:
+                return None
+            cfg = self.engine.point_config(point)
+            mode = self.engine.mode(point)
+
+            def run() -> List[tuple]:
+                held = []
+                for target, action, content in writes:
+                    d = self.engine.decide(point, {"entry": content[:4000], "target": target, "action": action},
+                                           memory_filter.questions(), memory_filter.make_policy(cfg, content),
+                                           session_id=sid, spec_version=memory_filter.SPEC_VERSION,
+                                           log_detail={"target": target, "action": action,
+                                                       "preview": " ".join(content.split())[:160]})
+                    if d.error:
+                        return []                      # fail open: the write goes ahead
+                    if d.action == "hold":
+                        held.append((target, content, d.detail))
+                return held
+
+            if mode == "shadow":
+                self._shadow_pool.submit(run)
+                return None
+            held = run()
+            if not held:
+                return None
+            with self._lock:
+                self._memory_noted.add(key)
+            return {"action": "block", "message": memory_filter.note(held)}
+        except Exception:
+            logger.debug("jermes memory_filter failed", exc_info=True)
+            return None
 
     def _skill_overlap(self, args: Dict[str, Any], sid: str) -> Optional[Dict[str, Any]]:
         """Before skill_manage create: does an existing skill already cover this?
@@ -280,7 +327,8 @@ class Harness:
                 recent_context=self._context.get(sid, ""),
             )
             qs = risk_gate.questions(bool(last))
-            policy = risk_gate.make_policy(cfg, protected=risk_gate.touches_protected(tool_name, args or {}))
+            policy = risk_gate.make_policy(cfg, protected=risk_gate.touches_protected(tool_name, args or {}),
+                                        secret_sink=risk_gate.sends_secret(tool_name, args or {}))
             kw = {"session_id": sid, "spec_version": risk_gate.SPEC_VERSION, "log_detail": {"tool": tool_name}}
             if self._shadow(point, state, qs, policy, **kw):
                 return None

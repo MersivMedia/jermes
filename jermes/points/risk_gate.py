@@ -62,6 +62,45 @@ def touches_protected(tool_name: str, args: Mapping[str, Any]) -> bool:
     return False
 
 
+# Secret *content* leaving the machine: a credential file is read as text
+# (cat, grep, base64, an upload's @file, python open()) and the same call has
+# a network sink. Loading keys into the environment (`. .env`, `source`,
+# `set -a`) is deliberately not a read here: that is how API calls normally
+# get their keys, and the key goes to the service it belongs to.
+_SECRET_FILE = (_HOME + "(" + _AGENT + r"/(auth\.json|\.env)|" + "s" + r"sh/|aws/credentials|netrc|gnupg/)"
+                r"|(^|[/\s\"'@<=(])\.env\b|\bid_(rsa|ed25519|ecdsa)\b|\bcredentials\.json\b")
+_PRINT_ENV = "print" + "env"          # split so plugin scanners don't read the rule as a use
+_OS_ENV = r"os\." + "environ"
+_READ_SECRET = re.compile(
+    r"(\b(cat|grep|egrep|rg|sed|awk|head|tail|base64|xxd|od|strings|tar|zip|gzip|cp|scp|rsync)\b[^\n;|&]*(" + _SECRET_FILE + "))"
+    r"|(@|<\s*)(" + _SECRET_FILE + ")"
+    r"|open\(\s*[^)]*(" + _SECRET_FILE + ")"
+    # the whole environment, not one named variable (os.environ["X"] feeding
+    # that service's own API is the normal way keys are used)
+    r"|\b(dict|json\.dumps|str|repr|list)\(\s*" + _OS_ENV + r"\b|\b" + _OS_ENV + r"\.(items|keys|values|copy)\(\)"
+    r"|\b" + _PRINT_ENV + r"\s*($|[|>;)])|(^|[\s;&|(])env(\s*[>)]|\s*$|\s*[|])"
+    r"|\$\(\s*env\s*\)"
+)
+_NET_SINK = re.compile(
+    r"\b(curl|wget|nc|ncat|netcat|" + "so" + r"cat|nslookup|dig|host|ssh|scp|rsync|ftp|sftp|telnet)\b"
+    r"|urlopen|requests\.(post|put|get|patch)|httpx\.|http\.client|socket\.|aiohttp|smtplib"
+    r"|git\s+push"
+)
+
+
+def sends_secret(tool_name: str, args: Mapping[str, Any]) -> bool:
+    """Code-level taint check: secret content read and a network sink in one call."""
+    if tool_name == "terminal":
+        text = strip_shell_comments(str(args.get("command") or ""))
+    elif tool_name == "execute_code":
+        text = str(args.get("code") or "")
+    elif tool_name == "write_file":
+        text = str(args.get("content") or "")   # a script that will do it when run
+    else:
+        return False
+    return bool(_READ_SECRET.search(text) and _NET_SINK.search(text))
+
+
 def strip_shell_comments(command: str) -> str:
     """Remove shell comments, the easiest injection vector against a judge.
 
@@ -150,8 +189,9 @@ def questions(has_previous_result: bool) -> Dict[str, Any]:
     return qs
 
 
-def make_policy(cfg: Mapping[str, Any], *, protected: bool = False):
-    """``protected``: the call writes to a protected path (``touches_protected``)."""
+def make_policy(cfg: Mapping[str, Any], *, protected: bool = False, secret_sink: bool = False):
+    """``protected``: the call writes to a protected path (``touches_protected``).
+    ``secret_sink``: the call reads secret content and has a network sink (``sends_secret``)."""
     block_t = float(cfg.get("block_threshold", 0.85))
     review_t = float(cfg.get("review_threshold", 0.7))
     review_risk = float(cfg.get("review_risk_score", 2.5))
@@ -183,6 +223,10 @@ def make_policy(cfg: Mapping[str, Any], *, protected: bool = False):
             return Verdict("block", {**detail, "reason": "appears to follow instructions found in a tool result"})
         if hazards["destructive"] >= block_t and p_no >= mismatch_t:
             return Verdict("block", {**detail, "reason": "destructive action the user did not ask for"})
+
+        # Secret content leaving the machine (checked in code): always a human, even if asked.
+        if secret_sink:
+            return Verdict("review", {**detail, "reason": "reads secret content and sends it over the network"})
 
         # Protected paths (checked in code): unless clearly requested, a human confirms.
         if protected and match.choice != "yes":

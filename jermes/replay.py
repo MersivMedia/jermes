@@ -222,6 +222,8 @@ def replay_risk(harness: Harness, turns: List[Turn], *, max_calls: int = 200, pr
                                           max_arg_chars=int(cfg.get("max_arg_chars", 4000)))
             d = harness.engine.decide("risk_gate", state, risk_gate.questions(False),
                                       risk_gate.make_policy(cfg, protected=risk_gate.touches_protected(
+                                          c["tool"], c["args"] if isinstance(c["args"], dict) else {}),
+                                        secret_sink=risk_gate.sends_secret(
                                           c["tool"], c["args"] if isinstance(c["args"], dict) else {})),
                                       session_id=f"replay:{t.session_id}", spec_version=risk_gate.SPEC_VERSION,
                                       log_detail={"tool": c["tool"], "replay": True})

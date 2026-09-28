@@ -109,6 +109,13 @@ DEFAULTS: Dict[str, Any] = {
             "top_k": 4,               # shortlisted existing skills judged side by side
             "deadline_s": 12.0,       # two sequential Jev calls; well under Hermes' 30 s hook timeout
         },
+        # X4 - memory write filter: hold task progress / long procedures out of persistent
+        # memory (pre_tool_call on `memory`). advise = held once, the same write retried goes through.
+        "memory_filter": {
+            "mode": "shadow",
+            "progress_threshold": 0.7,
+            "procedure_threshold": 0.9,   # and written as steps (heading or 3+ numbered/bulleted items)
+        },
         # Ingestion pipeline (explicit tool/CLI, not a hook). Jev only picks
         # among candidates code found; it never writes values.
         "ingest": {

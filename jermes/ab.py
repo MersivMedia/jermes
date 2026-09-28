@@ -107,7 +107,10 @@ def clean_env(home: Path, work: Path, arm: str) -> Dict[str, str]:
     return env
 
 
-def _make_home(src: Path, arm: str, points: Dict[str, str]) -> Path:
+def _make_home(src: Path, arm: str, points: Dict[str, str],
+               base_points: Optional[Dict[str, str]] = None) -> Path:
+    """``base_points``: when set, the "off" arm also runs Jermes, with these
+    point modes (compare two Jermes setups instead of Jermes vs none)."""
     home = Path(tempfile.mkdtemp(prefix=f"jermes-ab-{arm}-"))
     for name in (".env", "auth.json"):
         if (src / name).exists():
@@ -129,7 +132,11 @@ def _make_home(src: Path, arm: str, points: Dict[str, str]) -> Path:
     cfg["approvals"] = {"mode": "off"}
     if (src / "skills").exists():
         os.symlink(src / "skills", home / "skills", target_is_directory=True)
-    if arm == "on":
+    if arm == "off" and base_points:
+        points, arm_uses_plugin = base_points, True
+    else:
+        arm_uses_plugin = arm == "on"
+    if arm_uses_plugin:
         (home / "plugins").mkdir()
         os.symlink(REPO, home / "plugins" / "jermes", target_is_directory=True)
         cfg["plugins"] = {"enabled": ["jermes"]}
@@ -175,8 +182,8 @@ def _jev_usage(home: Path) -> Dict[str, Any]:
 
 
 def run_one(task: Task, arm: str, repeat: int, *, src_home: Path, points: Dict[str, str], timeout: int,
-            keep: bool = False) -> Run:
-    home = _make_home(src_home, arm, points)
+            keep: bool = False, base_points: Optional[Dict[str, str]] = None) -> Run:
+    home = _make_home(src_home, arm, points, base_points)
     work = Path(tempfile.mkdtemp(prefix=f"jermes-ab-work-{task.name}-"))
     task.setup(work)
     run = Run(task.name, arm, repeat)
@@ -234,7 +241,8 @@ def preflight(src_home: Path) -> List[str]:
 
 def run_ab(task_names: List[str], repeats: int = 1, *, points: Optional[Dict[str, str]] = None,
            src_home: Optional[Path] = None, timeout: int = 900, out_path: Optional[Path] = None,
-           progress=print, parallel: int = 0) -> List[Run]:
+           progress=print, parallel: int = 0, base_points: Optional[Dict[str, str]] = None,
+           keep: bool = False) -> List[Run]:
     points = points or {"skill": "advise", "filt": "enforce"}
     src_home = src_home or Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
     problems = preflight(src_home)
@@ -252,7 +260,8 @@ def run_ab(task_names: List[str], repeats: int = 1, *, points: Optional[Dict[str
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     with ThreadPoolExecutor(parallel) as ex:
-        futs = {ex.submit(run_one, task, arm, rep, src_home=src_home, points=points, timeout=timeout): (task, arm, rep)
+        futs = {ex.submit(run_one, task, arm, rep, src_home=src_home, points=points, timeout=timeout,
+                          base_points=base_points, keep=keep): (task, arm, rep)
                 for task, arm, rep in jobs}
         for fut in as_completed(futs):
             task, arm, rep = futs[fut]

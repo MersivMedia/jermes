@@ -11,17 +11,18 @@ Plain code makes each decision by asking [Jev](https://typesafe.ai/blog/introduc
 | **[Context trimming](#context-trimming)** | After a pause, which old tool results and file reads are no longer needed; those become one-line stubs with the full text saved on disk | **−39% agent cost** over 5 live A/B sessions, every answer still correct. Offline estimate on 13 real sessions: −22% to −33% |
 | **[Skill selection](#skill-selection)** | Which of 200+ skills a request needs, or none | Right first skill on 72% of 40 hand-labelled real turns (the agent alone: 7%) |
 | **Duplicate skills** | Before a new skill is created, whether an existing one already covers it; `skills-audit` checks the whole library | First live audit of 95 skills found 4 duplicate groups for $0.04; all merged after review |
-| **Risk gate** | Whether a tool call is dangerous or not what the user asked; writes to config and credential files always go to review | Every dangerous test case stopped, every safe one allowed; 15% of 100 real calls sent to review, none blocked; 257 ms |
-| **Tool-result filter** | Which sections of a long result matter for the task | Mixed: −10% prompt tokens but +5% cost in the latest A/B, because the agent sometimes re-reads what was cut |
+| **[Risk gate](#risk-gate)** | Whether a tool call is dangerous or not what the user asked; writes to config and credential files, and commands that read secrets and send them over the network, always go to review | Stopped every dangerous case in the basic set (31) and a new red-team set of disguised attacks (33), with no safe call blocked; 15% of 100 real calls sent to review; 278 ms |
+| **Tool-result filter** | Which sections of a long result matter for the task | Mixed: −10% prompt tokens but +5% cost alone; with context trimming on as well it added only −2% (one pair, within noise) |
+| **[Memory filter](#memory-filter)** | Before a memory write, whether it's a durable fact or task progress / a how-to that belongs in a skill; those are held once with a note | 100% right on 77 labelled entries from one install (tuned on these); 15 of 16 right on a held-out set, no durable fact held |
 | **Loop guard** | Whether the agent is repeating a failed step | Catches 31% of real repeated failures at 5% false alarms; stays in shadow |
 | **Model router** | Whether a turn is easy enough for a cheaper model; a cost check refuses switches that would cost more after cache effects | Not yet A/B tested. On one install, under 1% of spend was routable |
 | **[Data ingestion](#data-ingestion)** | Which code-found candidate is each field's value, and whether to escalate to a strong model | 94/94 correct on held-out SEC filings at **11× lower cost** than a strong model reading every document |
 
-Every result, with methods and caveats, is in [Test results](#test-results) and the dated history in [docs/RESULTS.md](docs/RESULTS.md). Measurement tools ship with the plugin: `savings`, `costsim` and `ab` for token cost, `riskbench` and `loopbench` for the guards, `skills-audit` for the skill library.
+Every result, with methods and caveats, is in [Test results](#test-results) and the dated history in [docs/RESULTS.md](docs/RESULTS.md). Measurement tools ship with the plugin: `savings`, `costsim` and `ab` for token cost, `trimreport` for whether trimmed content was needed again, `riskbench` (with `--redteam`), `loopbench` and `memorybench` for the guards, `skills-audit` for the skill library.
 
 The design, the evidence behind it, and the rollout plan are in the **[PRD](docs/PRD.md)**.
 
-> **Status: v0.6, Phase 0 (shadow mode).** Every decision point ships in `shadow`: Jermes calls Jev and logs what it *would* do, but changes nothing in Hermes until you promote a point. Context trimming also needs `context: {engine: jermes}` in Hermes' main config file.
+> **Status: v0.7, Phase 0 (shadow mode).** Every decision point ships in `shadow`: Jermes calls Jev and logs what it *would* do, but changes nothing in Hermes until you promote a point. Context trimming also needs `context: {engine: jermes}` in Hermes' main config file.
 
 ## Quick start
 
@@ -100,12 +101,13 @@ Jermes uses only public Hermes plugin surfaces. It needs no core patches and nev
 | Decision point | PRD | Hermes surface | What `enforce`/`advise` does |
 |---|---|---|---|
 | `skill_suggest` | D1 | `pre_llm_call` hook | Filters 100+ skills down to the few worth loading: a primary skill plus supporting ones, or "no skill needed". Sees the request plus the last few turns of conversation. |
-| `risk_gate` | D3, D4 | `pre_tool_call` hook | Blocks clearly dangerous, unrequested calls. Sends uncertain ones to Hermes' approval gate. |
+| `risk_gate` | D3, D4 | `pre_tool_call` hook | Blocks clearly dangerous, unrequested calls. Sends uncertain ones to Hermes' approval gate. Two code rules always send to review: writes to protected paths the user didn't ask for, and a command or script that reads secret content (key files, `.env`, the whole environment) and also talks to the network. |
 | `result_filter` | D5 | `transform_tool_result` hook | Drops irrelevant sections of big tool results before the model re-reads them every turn. |
 | `loop_guard` | D6 | `transform_tool_result` hook | Adds a one-line note when a failed call is repeated or the task already looks done. |
 | `model_router` | D7 | `llm_request` middleware | Sends confidently easy, low-stakes turns to a cheaper model, sticky for the whole turn. A cost check refuses the switch when the conversation won't fit the cheaper model or rewriting the prompt cache would cost more than the turn saves. |
 | `skill_overlap` | - | `pre_tool_call` on `skill_manage` create | Before a new skill is written, checks whether an existing skill already covers the same job. If one does, the agent is told which and asked to extend it or confirm the new one is distinct; the same create retried goes through. `hermes jermes skills-audit` runs the same check across the library and suggests merges (suggestions only). |
 | `context_trim` | X3 | context engine (`context: {engine: jermes}`) | After a pause long enough for the prompt cache to expire, Jev scores old tool traffic: "will this still be needed?" Items it drops are replaced by one-line stubs pointing to the full text on disk. See [Context trimming](#context-trimming). |
+| `memory_filter` | X4 | `pre_tool_call` on `memory` | Asks whether each add/replace is a durable fact, task progress, or a step-by-step procedure. Progress, and procedures written as steps, are held once with a note suggesting a durable rewording or a skill; the same write retried goes through. Removes are never checked. |
 | `ingest` | I2 to I9 | `hermes jermes ingest` (explicit, not a hook) | Extracts fields from documents: code finds candidates, Jev picks, code copies. Only flagged fields reach a strong model. See [Data ingestion](#data-ingestion). |
 
 ### Skill selection
@@ -213,8 +215,10 @@ hermes jermes ingest    # extract fields from documents; --bench compares agains
 hermes jermes savings   # estimate tokens and dollars Jermes would have saved on your sessions
 hermes jermes ab        # run fixed tasks with Jermes off and on; compare Hermes' own costs
 hermes jermes costsim   # price past sessions with context trimming applied (offline)
+hermes jermes trimreport    # of the items trimming dropped, which did the agent need again?
 hermes jermes skills-audit  # find overlapping installed skills and suggest merges (changes nothing)
-hermes jermes riskbench # score the risk gate on labelled cases and real past calls
+hermes jermes riskbench # score the risk gate on labelled cases and real past calls; --redteam for disguised attacks
+hermes jermes memorybench   # score the memory filter on labelled entries (--build drafts a labels file)
 hermes jermes loopbench # score the loop guard on real repeated failures
 hermes jermes stats     # decisions, cache hits, latency, tokens per point
 hermes jermes recent    # last decisions
@@ -315,6 +319,10 @@ Trimming was cheaper in every pair (−32% to −63%). When a later question nee
 
 **Offline estimate** (`hermes jermes costsim`, 13 real sessions, $746 of spend): −22% if Jev keeps 30% of old items, −33% if every old item is trimmed.
 
+**Was trimmed content needed again?** (`hermes jermes trimreport`, September 28) For every item trimming dropped, the report checks the rest of the session for a re-read of the same file, a search or partial read of it, or a re-run of the same command. On the two latest `recall` runs (15 distinct items dropped, about 260k characters), 3 items were needed again, and all 3 were recovered by a search or a partial read that brought back about 28k characters in total. Nothing was re-read in full. This is test data built to need trimmed details; the report is meant for real shadow logs before switching trimming to enforce.
+
+**With the result filter as well** (one `recall` pair, both arms trimming): $1.92 without the filter, $1.88 with it (−2.4%), both correct. The filter fired once. Once trimming handles old reads, the filter has little left to do on this kind of task; one pair is not enough to rule it out elsewhere.
+
 ### Duplicate skills (September 27, 2026)
 
 `hermes jermes skills-audit` checked the 95 agent-created skills on one install against all 207 installed skills: 207 Jev requests, $0.04, 6 minutes. It found four groups:
@@ -328,9 +336,36 @@ Trimming was cheaper in every pair (−32% to −63%). When a later question nee
 
 It held back on close calls under 70% that are related but distinct (`guidance`/`outlines`, `find-nearby`/`maps`). Each merge was reviewed by hand before editing; afterwards, a re-run on the four merged skills found nothing above 28%. The keeper rule (bundled first, then the skill that contains the others, then the longest) got one group of four wrong, which is why the command only suggests.
 
-### Risk gate (September 26, 2026)
+### Risk gate
 
-31 labelled cases and 100 real past calls: every dangerous case was stopped, every safe case was allowed, and 15% of real calls went to review, with none blocked. Latency: 257 ms at the median. Details and the before/after table are in [docs/RESULTS.md](docs/RESULTS.md).
+**Basic set (September 26):** 31 labelled cases: every dangerous case stopped, every safe case allowed.
+
+**Red-team set (September 28):** 33 cases written to get past a reviewer: secrets sent out through a "health check", a telemetry snippet, DNS lookups or a new git remote; persistence through shell profiles, cron and SSH keys; turning off approvals in the config; poisoning a skill; instructions planted in a README, issue comment or web page; exfiltration handed to a sub-agent or cron job; destructive commands dressed as cleanup; a reverse shell as a "port test". Most come with a harmless twin that looks alike.
+
+| | Before (Jev + protected paths) | After (+ secret-to-network rule) |
+|---|---|---|
+| Dangerous cases stopped (blocked or sent to review) | 19/20 | **20/20** |
+| Dangerous + needs-a-human cases stopped (21) | 90% | 95% |
+| Harmless twins allowed | 10/12 | 10/12 |
+| Harmless calls blocked | 0 | 0 |
+| Hermes' own regex, dangerous shell cases flagged | 54% | 54% |
+
+The one miss before the fix was a DNS exfiltration: Jev never saw the secret because Jermes redacts secret-looking values before sending state to it, so the command looked harmless. The fix is a code rule, not a Jev question: a command or script that reads secret content *and* talks to the network always goes to review. On 4,687 real past calls it fired on 8 (0.17%). None was an attack: 4 barely touched a secret (counting keys with `grep -c`, writing test fixtures like this red-team file), and 4 read a key or `.env` in the same command as an `ssh` or `curl` while setting up a GPU pod. Those 8 would have needed one approval each.
+
+Most dangerous red-team cases are sent to review rather than blocked (only 5 of 20 blocked outright), and 2 harmless twins (a `git push`, following a benign instruction from a file) went to review. That is the gate being cautious, not letting things through, but it's why `risk_gate` stays in shadow/advise for now.
+
+**Real calls:** 15% of 100 real past calls went to review, none blocked; 278 ms at the median. Details are in [docs/RESULTS.md](docs/RESULTS.md).
+
+### Memory filter
+
+Hermes re-sends its memory files on every turn, and its own guidance says memory is for durable facts, not task progress or procedures. `memory_filter` asks Jev about each write before it lands. It was built and scored offline; it isn't yet A/B tested live.
+
+| Set | Entries | Right | Durable facts wrongly held | Progress/procedures caught |
+|---|---|---|---|---|
+| One install: its 36 current memory entries, 31 past memory writes, 10 written examples | 77 | **100%** | 0% | 100% |
+| Held out (written after tuning, not used to set thresholds) | 16 | 94% | 0% | 7 of 8 |
+
+The first version held 17% of durable entries because dense fact lists (API quirks, preference lists) also score as "procedure". The fix: a procedure is only held when it's also written as steps (a heading or three or more numbered/bulleted items). That was tuned on the first set, so its 100% is in-sample; the held-out set is the honest number. The one held-out miss was a spend note ("spent $7.40 on RunPod today") that Jev rated as a durable fact. Labels contain personal memory content and stay outside the repo; `hermes jermes memorybench --build` drafts a labels file from any install.
 
 ### Data ingestion: SEC 10-K cover pages (September 25, 2026)
 
@@ -400,7 +435,8 @@ Caveats:
 - **Vercel 503s.** During testing, up to about 20% of calls got a temporary 503 from the gateway. Live hooks fail open (Hermes carries on unchanged); replay retries.
 - **OpenRouter is untested live.** The request format matches OpenRouter's documentation and is covered by tests, but no live call has been made with an OpenRouter key yet.
 - **Latency.** The risk gate took 243 ms at the median and 340 ms at the 90th percentile over 100 real calls. Skill selection makes two calls in sequence.
-- **Scored so far:** skill selection (hand labels), `result_filter` (A/B cost, mixed results), ingestion (SEC benchmark), `risk_gate` (31 labelled cases and 100 real calls) and `loop_guard` (real repeated failures). `model_router` has a cost check but no measured results.
+- **Scored so far:** skill selection (hand labels), `result_filter` (A/B cost, mixed results), ingestion (SEC benchmark), `risk_gate` (31 labelled cases, 33 red-team cases, 100 real calls), `loop_guard` (real repeated failures) and `memory_filter` (offline, labelled entries from one install). `model_router` has a cost check but no measured results.
+- **Redaction hides secrets from Jev too.** Jev can't tell a command sends a secret if the secret was redacted before Jev saw it. The secret-to-network rule covers that case in code.
 - **Routing saves little on long, judgment-heavy sessions.** On one install, Jev rated 5 of 137 turns after a pause as easy enough for a cheaper model, and none of 88 long tool loops as safe to hand to a cheap worker. Context trimming is where that install's savings are.
 - **Agents may not trust filtered results.** When `result_filter` trims a file, the agent sometimes re-reads or searches it anyway, which costs more than not filtering.
 - **Ingestion is sequential and slow** (about 34 s per document on Vercel), and its accuracy has only been measured on clean, typed text.
@@ -423,6 +459,7 @@ points:
   result_filter: { mode: enforce, keep_threshold: 0.35 }
   context_trim:  { mode: enforce, ttl_s: 300, keep_turns: 2, keep_threshold: 0.5 }
   loop_guard:    { mode: advise }
+  memory_filter: { mode: advise, progress_threshold: 0.7, procedure_threshold: 0.9 }
   model_router:  { mode: shadow, cheap_model: "anthropic/claude-haiku-4-5" }
 ```
 
@@ -434,7 +471,7 @@ Modes: `off` → `shadow` (log only) → `advise` (notes and suggestions) → `e
 
 ```bash
 uv venv && uv pip install -e '.[dev]'
-pytest                                  # 176 tests, offline; Jev is faked at the HTTP layer
+pytest                                  # 194 tests, offline; Jev is faked at the HTTP layer
 HERMES_AGENT_DIR=~/hermes-agent pytest  # also runs the end-to-end test against a real Hermes checkout
 ```
 
@@ -463,8 +500,12 @@ The end-to-end tests run against a real Hermes checkout in a temporary `HERMES_H
 - [ ] Harder ingestion benchmark (scanned documents, ambiguous fields); request intake (I1); parallel Jev requests
 - [x] Score `risk_gate` and `loop_guard`; protected-path rule for config and credential files
 - [ ] Phase 1 to 2: promote `result_filter`, `skill_suggest`, `risk_gate`
-- [ ] Context trimming: two weeks of live shadow logs, then a `trimreport` (would-be-trimmed items the agent later needed) before enforce
-- [ ] Workstream 3 extras (PRD §7): gateway triage, cron wake gating, memory filter, citation checks
+- [x] `trimreport`: which trimmed items the agent needed again (re-read, searched, re-run)
+- [ ] Context trimming: two weeks of live shadow logs through `trimreport`, then enforce
+- [x] Risk-gate red-team set (33 disguised attacks with harmless twins); secret-to-network rule
+- [x] Memory write filter (X4), scored offline on one install plus a held-out set
+- [ ] Memory filter live A/B; more installs' labels
+- [ ] Workstream 3 extras (PRD §7): gateway triage, cron wake gating, citation checks
 - [ ] Cross-provider routing via `llm_execution` middleware
 
 ## License

@@ -13,6 +13,7 @@
     loopbench  score the loop guard's repeat-failure check on real past sessions
     costsim  price your past sessions under context trimming (offline, no Jev calls)
     skills-audit  find overlapping installed skills and suggest merges (suggestions only)
+    trimreport  check whether the agent later needed what context trimming dropped
     stats    decisions per point and mode, cache hits, latency, tokens
     recent   last N logged decisions
 """
@@ -21,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -261,7 +263,8 @@ def cmd_ab(args) -> int:
     try:
         runs = ab.run_ab(names, args.repeats, points={"skill": args.skill_mode, "filt": args.filter_mode,
                                                       "trim": args.trim_mode, "guards": args.guards_mode},
-                         timeout=args.timeout, out_path=out, parallel=args.parallel)
+                         timeout=args.timeout, out_path=out, parallel=args.parallel,
+                         base_points=_parse_points(args.baseline) if args.baseline else None, keep=args.keep)
     except RuntimeError as exc:
         print(f"FAILED preflight: {exc}")
         return 1
@@ -316,8 +319,13 @@ def cmd_riskbench(args) -> int:
     eng.config["points"]["risk_gate"]["mode"] = "enforce"
     out: Dict[str, Any] = {}
     if not args.real_only:
-        print("labelled cases:")
-        s = riskbench.score_cases(eng)
+        cases = None
+        if args.redteam:
+            from .redteam_cases import CASES as cases
+            print(f"red-team cases ({len(cases)}; disguised attacks plus look-alike benign twins):")
+        else:
+            print("labelled cases:")
+        s = riskbench.score_cases(eng, cases) if cases else riskbench.score_cases(eng)
         out["cases"] = s
         rx = s["regex"]
         print(f"\n  Jev: exact {_pct(s['exact'])}, dangerous blocked {_pct(s['dangerous_blocked'])}, "
@@ -354,6 +362,64 @@ def cmd_loopbench(args) -> int:
         print(f"    {d['type']:<9} p={d['p']:<5} {d['tool']:<12} {d['latest'][:100]}")
     if args.json:
         Path(args.json).write_text(json.dumps(r, indent=1, default=str))
+    return 0
+
+
+def _parse_points(spec: str) -> Dict[str, str]:
+    out = {"skill": "off", "filt": "off", "trim": "off", "guards": "off"}
+    for part in spec.split(","):
+        if part.strip():
+            k, v = part.split("=", 1)
+            if k.strip() not in out:
+                raise SystemExit(f"unknown baseline key {k!r}; use skill, filt, trim, guards")
+            out[k.strip()] = v.strip()
+    return out
+
+
+def cmd_memorybench(args) -> int:
+    from . import memorybench
+    from .store import data_dir
+
+    path = Path(args.labels) if args.labels else data_dir().parent / "data" / "jermes" / "memory_labels.json"
+    if args.build:
+        from .replay import default_db
+        try:
+            from hermes_constants import get_hermes_home  # type: ignore
+            home = Path(get_hermes_home())
+        except Exception:
+            home = Path.home() / ".hermes"
+        lab = memorybench.draft_labels(home, default_db())
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(lab, indent=1))
+        path.chmod(0o600)
+        print(f"draft labels written to {path}; set each past write's label to keep or hold, then rerun without --build")
+        return 0
+    lab = json.loads(path.read_text())
+    eng = _batch_engine(interval_s=args.interval)
+    eng.config["points"]["memory_filter"]["mode"] = "enforce"
+    r = memorybench.score(eng, lab)
+    print(f"\n  {r['n']} entries, {r['errors']} errors: progress/procedure caught {_pct(r['hold_caught'])}, "
+          f"durable wrongly held {_pct(r['keep_wrongly_held'])}, accuracy {_pct(r['accuracy'])}")
+    for s, v in r["by_source"].items():
+        print(f"    {s:<11} n={v['n']:<3} correct {_pct(v['correct'])}")
+    if args.json:
+        Path(args.json).write_text(json.dumps(r, indent=1))
+    return 0
+
+
+def cmd_trimreport(args) -> int:
+    from . import trimreport
+    from .replay import default_db
+    from .store import data_dir
+
+    since = 0.0
+    if args.days:
+        since = time.time() - args.days * 86400
+    r = trimreport.report(Path(args.decisions) if args.decisions else data_dir() / "decisions.sqlite",
+                          Path(args.db) if args.db else default_db(), since=since)
+    print(trimreport.render(r, top=args.top))
+    if args.json:
+        Path(args.json).write_text(json.dumps(r, indent=2))
     return 0
 
 
@@ -476,6 +542,10 @@ class register_cli:  # namespace used by the plugin entry point
         p.add_argument("--filter-mode", default="enforce", choices=["off", "shadow", "advise", "enforce"])
         p.add_argument("--trim-mode", default="off", choices=["off", "shadow", "enforce"],
                        help="context trimming (also switches Hermes to the jermes context engine)")
+        p.add_argument("--baseline", default=None,
+                       help="run the 'off' arm with Jermes too, e.g. 'trim=enforce,filt=off' "
+                            "(keys: skill, filt, trim, guards)")
+        p.add_argument("--keep", action="store_true", help="keep each run's Hermes home for inspection")
         p.add_argument("--parallel", type=int, default=0,
                        help="concurrent agent runs (default: 1, or 8 for tasks with pauses); each needs ~200 MB")
         p.add_argument("--guards-mode", default="shadow", choices=["off", "shadow"],
@@ -495,6 +565,7 @@ class register_cli:  # namespace used by the plugin entry point
         p = sub.add_parser("riskbench", help="score the risk gate on labelled cases and real past tool calls")
         p.add_argument("--real", type=int, default=0, help="also score N real tool calls from state.db")
         p.add_argument("--real-only", action="store_true")
+        p.add_argument("--redteam", action="store_true", help="score the disguised-attack set instead")
         p.add_argument("--db", default=None)
         p.add_argument("--interval", type=float, default=2.1)
         p.add_argument("--json", default=None)
@@ -503,6 +574,17 @@ class register_cli:  # namespace used by the plugin entry point
         p.add_argument("--negatives", type=int, default=80)
         p.add_argument("--db", default=None)
         p.add_argument("--interval", type=float, default=2.1)
+        p.add_argument("--json", default=None)
+        p = sub.add_parser("memorybench", help="score the memory write filter against labelled entries")
+        p.add_argument("--labels", default=None, help="labels JSON (default: $HERMES_HOME/data/jermes/memory_labels.json)")
+        p.add_argument("--build", action="store_true", help="draft a labels file from current memory + past writes")
+        p.add_argument("--interval", type=float, default=2.1)
+        p.add_argument("--json", default=None)
+        p = sub.add_parser("trimreport", help="did the agent need what context trimming dropped?")
+        p.add_argument("--db", default=None, help="Hermes state.db (default: this profile's)")
+        p.add_argument("--decisions", default=None, help="Jermes decisions.sqlite (default: this profile's)")
+        p.add_argument("--days", type=float, default=0, help="only decisions from the last N days")
+        p.add_argument("--top", type=int, default=12)
         p.add_argument("--json", default=None)
         p = sub.add_parser("skills-audit", help="find overlapping installed skills and suggest merges")
         p.add_argument("--scope", default="local", choices=["local", "all"],
@@ -527,7 +609,8 @@ class register_cli:  # namespace used by the plugin entry point
         cmd = getattr(args, "jermes_cmd", None) or "status"
         return {"status": cmd_status, "stats": cmd_stats, "recent": cmd_recent, "check": cmd_check,
                 "rank": cmd_rank, "replay": cmd_replay, "label": cmd_label, "score": cmd_score, "savings": cmd_savings, "ab": cmd_ab, "ingest": cmd_ingest, "riskbench": cmd_riskbench, "loopbench": cmd_loopbench, "costsim": cmd_costsim,
-                "skills-audit": cmd_skills_audit}[cmd](args)
+                "skills-audit": cmd_skills_audit, "trimreport": cmd_trimreport,
+                "memorybench": cmd_memorybench}[cmd](args)
 
 
 def main(argv: Optional[List[str]] = None) -> int:

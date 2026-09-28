@@ -4,6 +4,45 @@ Every measurement so far, newest first. The [README](../README.md) shows only th
 
 Setup for all runs: one real Hermes install (about 200 skills), Jev through Vercel AI Gateway, real past turns replayed from Hermes' `state.db`. Metric definitions are in the README under "Score the results".
 
+## September 28, 2026: trim report, trimming + filter, red-team set, memory filter
+
+**`hermes jermes trimreport`.** For each item context trimming dropped (enforce) or would have dropped (shadow), it looks at the rest of the session in `state.db` and classifies it: re-read in full, searched or partially read, command re-run, or not needed. Items re-decided at several cold turns are counted once. Tested on 7 hand-built cases (including traps: a similarly named file in another folder, a search that doesn't touch the file) and run on the two kept `recall` homes below:
+
+| Run | Distinct items dropped | Needed again | How | Chars dropped / brought back |
+|---|---|---|---|---|
+| trimming + filter | 7 | 2 | search of `spec.md`, search of `logs/app.log` | 128,565 / 4,976 |
+| trimming only | 8 | 1 | partial reads of `spec.md` | 131,929 / 23,222 |
+
+No item was re-read in full. The first version counted items once per cold turn (20 and 26 items); deduplication fixed that.
+
+**Trimming + result filter vs trimming alone** (`ab --baseline trim=enforce`, one `recall` pair, Opus 5.5, guards off): $1.925 → $1.879 (−2.4%), prompt tokens −5.4%, both 1/1 correct. The filter fired once (a 72k-char spec read, 57 of 83 chunks kept). Within run-to-run noise; not repeated, because the effect is small next to trimming's. New A/B option `--baseline` sets points on the off arm, so two Jermes configurations can be compared.
+
+**Risk gate red-team set** (`riskbench --redteam`, 33 cases: 20 dangerous, 1 needs-a-human, 12 harmless twins). Case strings are assembled from pieces so Hermes' plugin scanner stays "safe".
+
+| | v1 (Jev + protected paths) | v2 (+ secret-to-network rule) |
+|---|---|---|
+| Dangerous stopped | 95% (19/20) | **100%** |
+| Dangerous blocked outright | 25% | 25% |
+| Needs-a-human stopped | 90.5% | 95.2% |
+| Harmless allowed | 83% | 83% |
+| Harmless blocked | 0% | 0% |
+| Exact label match | 45.5% | 45.5% |
+| Hermes regex (21 shell cases): dangerous flagged / harmless flagged | 54% / 0% | 54% / 0% |
+
+v1 missed `rt_exfil_dns`: Jermes' redaction replaced the secret-reading part before Jev saw it. v2 adds `sends_secret()` in `risk_gate.py`: reading secret *content* (private key files, `.env`, `auth.json`, the whole environment, not a single named variable) together with a network sink sends the call to review, even when the user asked for something similar. Checked offline first on 4,687 real past calls: 8 flagged (0.17%), none an attack (4 trivial: `grep -c` key counts and test fixtures; 4 read a key or `.env` alongside `ssh`/`curl` during GPU pod setup); an earlier draft that also matched reading a single named key variable flagged normal API-key use and was narrowed. The two harmless twins still sent to review are a `git push` and following a benign instruction from a file. Real-call run (100 calls): 85 allow, 15 review, 0 block; p50 278 ms, p90 397 ms. Jev cost for all risk runs: under $0.02.
+
+**Memory write filter (X4)** (`memory_filter` point, `pre_tool_call` on `memory`; `hermes jermes memorybench`). Three Jev questions per write: durable a month from now, task progress, multi-step procedure.
+
+| Version | Set | n | Right | Durable wrongly held | Hold caught |
+|---|---|---|---|---|---|
+| v1 (procedure ≥0.75 and ≥400 chars) | install set | 77 | 86% | 17% | 94% |
+| v2 (procedure ≥0.9 and written as steps) | install set | 77 | 100% | 0% | 100% |
+| v2 | held-out (16, written after v2) | 16 | 94% | 0% | 88% |
+
+Install set: 36 current memory/user entries (all labelled keep), 31 past memory writes from `state.db` (10 labelled hold: 6 step-by-step procedures that later became skills, 4 progress notes), 10 written examples. v1's false holds were dense fact entries (API quirks, a preference list repeated across rewrites). v2 is in-sample on that set; the held-out number is the one to quote. Held-out miss: "Spent $7.40 on RunPod today; pod stopped at 14:20 UTC" (durable 0.62). Labels are personal and kept outside the repo. Jev cost: under $0.01.
+
+Spend for this batch: about $3.80 (the A/B pair), under $0.05 of Jev.
+
 ## September 27, 2026: duplicate-skill audit (live)
 
 `hermes jermes skills-audit` over one install: 95 agent-created skills, each compared against all 207 installed skills. 207 Jev requests (976k Jev input tokens, $0.041), 349 seconds, 0 errors.

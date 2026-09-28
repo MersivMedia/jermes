@@ -44,7 +44,8 @@ def decide(engine: Engine, tool: str, args: Dict[str, Any], request: str, previo
     state = risk_gate.build_state(tool, args, request, last_tool_result=previous,
                                   max_arg_chars=int(cfg.get("max_arg_chars", 4000)), recent_context=context)
     d = engine.decide("risk_gate", state, risk_gate.questions(bool(previous)),
-                      risk_gate.make_policy(cfg, protected=risk_gate.touches_protected(tool, args)),
+                      risk_gate.make_policy(cfg, protected=risk_gate.touches_protected(tool, args),
+                                        secret_sink=risk_gate.sends_secret(tool, args)),
                       session_id=session, spec_version=risk_gate.SPEC_VERSION, log_detail={"tool": tool})
     return {"action": d.action or "error", "error": d.error, "detail": d.detail, "latency_ms": d.latency_ms,
             "tokens": d.input_tokens}
