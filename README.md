@@ -206,7 +206,7 @@ points:
 
 ## Dashboard
 
-With the plugin installed, the Hermes web dashboard shows a **Jermes** tab (after Skills). If the dashboard was already running when you installed Jermes, restart it once (`hermes dashboard`, or `sudo systemctl restart hermes-dashboard` for a service install) so it picks up the new tab and its API.
+With the plugin installed, the Hermes web dashboard shows a **Jermes** tab (after Skills). If the dashboard was already running when you installed Jermes, restart it once (stop and start `hermes dashboard`, or restart its systemd service if you run it as one) so it picks up the new tab and its API.
 
 | Card | What it shows |
 |---|---|
