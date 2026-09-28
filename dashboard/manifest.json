@@ -1,0 +1,14 @@
+{
+  "name": "jermes",
+  "label": "Jermes",
+  "description": "Jev decision layer: feature modes, shadow decisions, readiness reports, Jev cost, skills audit",
+  "icon": "Shield",
+  "version": "0.9.0",
+  "tab": {
+    "path": "/jermes",
+    "position": "after:skills"
+  },
+  "entry": "dist/index.js",
+  "css": "dist/style.css",
+  "api": "plugin_api.py"
+}

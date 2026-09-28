@@ -20,9 +20,11 @@ Plain code makes each decision by asking [Jev](https://typesafe.ai/blog/introduc
 
 Every result, with methods and caveats, is in [Test results](#test-results) and the dated history in [docs/RESULTS.md](docs/RESULTS.md). Measurement tools ship with the plugin: `savings`, `costsim` and `ab` for token cost, `trimreport` for whether trimmed content was needed again, `riskbench` (with `--redteam` or `--cases FILE`), `loopbench` and `memorybench` for the guards, `skills-audit` for the skill library.
 
+**Dashboard tab.** Jermes adds a **Jermes** tab to the Hermes web dashboard (`hermes dashboard`): each feature's mode with off / shadow / advise / enforce switches (enforce asks for confirmation), recent shadow decisions, the trim report, would-block and would-hold lists, Jev spend per day, and a button to run the duplicate-skill audit. See [Dashboard](#dashboard).
+
 The design, the evidence behind it, and the rollout plan are in the **[PRD](docs/PRD.md)**.
 
-> **Status: v0.8, Phase 0 (shadow mode).** Every decision point ships in `shadow`: Jermes calls Jev and logs what it *would* do, but changes nothing in Hermes until you promote a point. Context trimming also needs `context: {engine: jermes}` in Hermes' main config file.
+> **Status: v0.9, Phase 0 (shadow mode).** Every decision point ships in `shadow`: Jermes calls Jev and logs what it *would* do, but changes nothing in Hermes until you promote a point. Context trimming also needs `context: {engine: jermes}` in Hermes' main config file.
 
 ## Quick start
 
@@ -201,6 +203,22 @@ points:
 - **Zero latency in shadow mode.** Shadow decisions run in a background thread.
 - **Everything is logged.** SQLite at `$HERMES_HOME/jermes/decisions.sqlite` records answers, probabilities, action, mode, policy version, latency and tokens for every decision.
 - **Redacted.** State goes through Hermes' secret redactor, plus a Jermes layer that catches long high-entropy tokens whatever their prefix, before anything leaves the machine.
+
+## Dashboard
+
+With the plugin installed, the Hermes web dashboard shows a **Jermes** tab (after Skills). If the dashboard was already running when you installed Jermes, restart it once (`hermes dashboard`, or `sudo systemctl restart hermes-dashboard` for a service install) so it picks up the new tab and its API.
+
+| Card | What it shows |
+|---|---|
+| Status | Jev provider and model, whether the API key is set (never its value), last Jev call, config path |
+| Jev cost | Spend today, last 7 days and all time, with a per-day bar chart (7, 30 or 90 days) |
+| Features | Each decision point with a mode switch. `advise` is only offered where the code acts on it (skill suggestions, duplicate skills, memory filter, loop guard); elsewhere it would behave like shadow. Switching to `enforce` shows what enforce does for that feature and asks for confirmation |
+| Context trimming: ready for enforce? | The trim report for the last 14 days: items dropped, how many were needed again, and how they came back |
+| Guards: ready for advise or enforce? | Risk-gate counts for the last 24 hours, plus every would-block, would-hold and skill-overlap flag |
+| Shadow decisions | Recent decisions with filters by feature and by would-act, with redacted previews of each call |
+| Duplicate-skill audit | Runs `skills-audit` in the background (about 6 minutes and $0.04 for ~100 skills) and shows the groups and suggested keepers. Suggestions only |
+
+Mode changes write `$HERMES_HOME/jermes/config.yaml`, keeping comments and other settings, after backing it up to `$HERMES_HOME/data/jermes/backups/`. Running agents pick up the new modes within a few seconds (Jermes now re-reads the file when it changes); context trimming applies to new sessions. The dashboard's routes live under `/api/plugins/jermes/` behind the dashboard's own login.
 
 ## Commands
 
@@ -481,7 +499,7 @@ Modes: `off` → `shadow` (log only) → `advise` (notes and suggestions) → `e
 
 ```bash
 uv venv && uv pip install -e '.[dev]'
-pytest                                  # 208 tests, offline; Jev is faked at the HTTP layer
+pytest                                  # 219 tests, offline; Jev is faked at the HTTP layer
 HERMES_AGENT_DIR=~/hermes-agent pytest  # also runs the end-to-end test against a real Hermes checkout
 ```
 
@@ -517,6 +535,8 @@ The end-to-end tests run against a real Hermes checkout in a temporary `HERMES_H
 - [x] Memory filter live A/B (one pair: nothing to hold on Opus 5.5)
 - [x] Independent red-team sets (GPT-5-written, tuning + held-out); risk_gate.3
 - [x] Skills-audit keeper: containment, then Jev's broadest-scope pick, then length
+- [x] Dashboard tab: modes with enforce behind a confirmation, shadow decisions, readiness reports, Jev cost chart, skills-audit button
+- [x] Config hot-reload: mode changes reach running agents without a gateway restart
 - [ ] Memory filter on weaker models and background reviews; more installs' labels
 - [ ] Risk gate: "a human should confirm" cases (4 of 6 allowed); a second independent attack author
 - [ ] Workstream 3 extras (PRD §7): gateway triage, cron wake gating, citation checks

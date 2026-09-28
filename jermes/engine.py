@@ -19,11 +19,12 @@ import json
 import logging
 import re
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Mapping, Optional
 
 from .client import ClientConfig, JevClient, JevError, JevResponse
-from .config import POLICY_VERSION, load_config
+from .config import POLICY_VERSION, load_config, config_path
 from .questions import Answer, Question, answer_to_dict, parse_answer, questions_to_wire
 from .store import Store, cache_key, state_hash
 
@@ -139,6 +140,12 @@ class Engine:
         )
         self._store = store
         self._store_lock = threading.Lock()
+        # Point modes follow edits to the config file (dashboard toggles, hand
+        # edits) without a gateway restart. Only engines built from the file
+        # reload; an explicit config dict (tests, batch tools) is left alone.
+        self._reloads = config is None
+        self._cfg_mtime = self._config_mtime()
+        self._cfg_checked = time.monotonic()
 
     @property
     def store(self) -> Store:
@@ -147,8 +154,33 @@ class Engine:
                 self._store = Store()
             return self._store
 
+    @staticmethod
+    def _config_mtime() -> float:
+        try:
+            return config_path().stat().st_mtime
+        except OSError:
+            return 0.0
+
+    def _maybe_reload(self) -> None:
+        """Re-read point settings when the config file changed (checked at most every 2 s)."""
+        if not self._reloads:
+            return
+        now = time.monotonic()
+        if now - self._cfg_checked < 2.0:
+            return
+        self._cfg_checked = now
+        mtime = self._config_mtime()
+        if mtime == self._cfg_mtime:
+            return
+        self._cfg_mtime = mtime
+        try:
+            self.config["points"] = load_config()["points"]   # backend/client settings stay as started
+        except Exception:
+            pass                                               # keep the last good settings
+
     def point_config(self, point: str) -> Dict[str, Any]:
         # Sub-steps ("skill_suggest.skim") share their parent point's config.
+        self._maybe_reload()
         return self.config["points"].get(point.split(".", 1)[0], {"mode": "off"})
 
     def mode(self, point: str) -> str:

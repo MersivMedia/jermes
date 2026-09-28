@@ -4,6 +4,28 @@ Every measurement so far, newest first. The [README](../README.md) shows only th
 
 Setup for all runs: one real Hermes install (about 200 skills), Jev through Vercel AI Gateway, real past turns replayed from Hermes' `state.db`. Metric definitions are in the README under "Score the results".
 
+## September 28, 2026 (v0.9): dashboard tab
+
+No new model measurements. Verification of the new tab:
+
+- **API:** 11 tests against a temporary Hermes home. They cover:
+  - mode changes that keep comments and other keys (inline and block YAML, and a point missing from the file), each with a backup;
+  - refusals for unknown features, for `advise` where it would act like shadow, and for `enforce` without an explicit confirm flag;
+  - status, which never returns key values;
+  - decision filters, 24-hour counts and time windows;
+  - cost, where cached answers are free;
+  - an empty install that returns data without errors;
+  - a second audit start refused while one runs;
+  - a running engine picking up a mode change without a restart.
+- **Real browser:** a temporary `hermes dashboard` from the installed Hermes, with Jermes installed and seeded decisions, driven in headless Chromium over CDP.
+  - The tab appears in the sidebar and all seven cards render with no errors.
+  - Clicking a mode switch changes the config file.
+  - For enforce, dismissing the confirmation dialog changed nothing (config file byte-identical). Accepting changed exactly one line.
+  - Checked at 1400 px and 390 px (phone) widths.
+- **Plugin scanner:** "safe" on local Hermes and upstream main, with no findings in the dashboard files.
+
+Not verified: the tab on the live dashboard, which sits behind its login. That needs one dashboard restart and a look from the user.
+
 ## September 28, 2026 (v0.8): independent red-team sets, risk_gate.3, keeper rule, memory A/B
 
 **Independent test sets.** GPT-5 (via Vercel AI Gateway, about $0.30) wrote cases from a description of the setting and output format only; it never saw Jermes' questions, thresholds, rules or own cases. Set 1: 40 cases (18 block, 6 review, 16 allow), used for tuning. Set 2: 41 cases (19 block, 6 review, 16 allow), told to avoid set 1's ideas, and scored once after the policy was final. Both are stored outside the repo; `riskbench --cases FILE` scores any such file.

@@ -38,6 +38,19 @@ def _rough_tokens(messages: Any) -> int:
         return 0
 
 
+def _preview(args: Any, limit: int = 160) -> str:
+    """Short, secret-redacted one-line view of tool arguments for the local decision log."""
+    try:
+        from .engine import _redact
+
+        a = _redact(dict(args or {}))
+        text = a.get("command") or a.get("code") or a.get("path") or a.get("goal") or a.get("prompt") \
+            or a.get("message") or json.dumps(a, ensure_ascii=False, default=str)
+        return " ".join(str(text).split())[:limit]
+    except Exception:
+        return ""
+
+
 class Harness:
     def __init__(self, engine: Optional[Engine] = None) -> None:
         self.engine = engine or Engine()
@@ -329,7 +342,8 @@ class Harness:
             qs = risk_gate.questions(bool(last))
             policy = risk_gate.make_policy(cfg, protected=risk_gate.touches_protected(tool_name, args or {}),
                                         secret_sink=risk_gate.sends_secret(tool_name, args or {}))
-            kw = {"session_id": sid, "spec_version": risk_gate.SPEC_VERSION, "log_detail": {"tool": tool_name}}
+            kw = {"session_id": sid, "spec_version": risk_gate.SPEC_VERSION,
+                  "log_detail": {"tool": tool_name, "preview": _preview(args)}}
             if self._shadow(point, state, qs, policy, **kw):
                 return None
             d = self.engine.decide(point, state, qs, policy, **kw)
