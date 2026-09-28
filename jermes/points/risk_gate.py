@@ -225,7 +225,12 @@ def make_policy(cfg: Mapping[str, Any], *, protected: bool = False, secret_sink:
     review_mismatch = bool(cfg.get("review_on_mismatch", False))
     # risk_gate.3: block a hazard that also goes against what the user said
     against_t = float(cfg.get("against_request_threshold", 0.7))
-    against_hazard_t = float(cfg.get("against_request_hazard", 0.6))
+    against_hazard_t = float(cfg.get("against_request_hazard", 0.7))
+    # Safety-weakening alone asks instead of blocking. Live use showed the "goes
+    # against the request" score firing on requested work the user plainly wanted
+    # (ssh with host-key checks off to a GPU pod, writing an API key to .env under
+    # a tight umask); a block there refuses real work with no way to approve it.
+    against_weakens_blocks = bool(cfg.get("against_request_weakens_blocks", False))
     # routine, clearly requested, reversible work is not sent to review on its risk level alone
     routine_yes = float(cfg.get("routine_requested_p", 0.7))
     routine_max = float(cfg.get("routine_max_hazard", 0.3))
@@ -269,9 +274,10 @@ def make_policy(cfg: Mapping[str, Any], *, protected: bool = False, secret_sink:
         # Deleting is left to the destructive rule above and to review below: an agent
         # cleaning up its own leftovers mid-task scores "not asked for" too, and a block
         # stops real work where a review only asks.
-        worst_k = max(("exfiltration", "weakens_safety"), key=lambda k: hazards.get(k, 0.0))
-        if against >= against_t and hazards.get(worst_k, 0.0) >= against_hazard_t:
-            name = worst_k.replace("_", " ")
+        kinds = ("exfiltration", "weakens_safety") if against_weakens_blocks else ("exfiltration",)
+        hit = [k for k in kinds if hazards.get(k, 0.0) >= against_hazard_t]
+        if against >= against_t and hit:
+            name = max(hit, key=lambda k: hazards.get(k, 0.0)).replace("_", " ")
             return Verdict("block", {**detail, "reason": f"goes against what the user asked ({name})"})
 
         # Secret content leaving the machine (checked in code): always a human, even if asked.

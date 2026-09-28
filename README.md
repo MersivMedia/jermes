@@ -11,7 +11,7 @@ Plain code makes each decision by asking [Jev](https://typesafe.ai/blog/introduc
 | **[Context trimming](#context-trimming)** | After a pause, which old tool results and file reads are no longer needed; those become one-line stubs with the full text saved on disk | **−39% agent cost** over 5 live A/B sessions, every answer still correct. Offline estimate on 13 real sessions: −22% to −33% |
 | **[Skill selection](#skill-selection)** | Which of 200+ skills a request needs, or none | Right first skill on 72% of 40 hand-labelled real turns (the agent alone: 7%) |
 | **Duplicate skills** | Before a new skill is created, whether an existing one already covers it; `skills-audit` checks the whole library | First live audit of 95 skills found 4 duplicate groups for $0.04; all merged after review. The suggested keeper is now the broadest skill, not the longest |
-| **[Risk gate](#risk-gate)** | Whether a tool call is dangerous or not what the user asked; writes to config and credential files, and commands that read secrets and send them over the network, always go to review | On 41 held-out attacks written by a different model (GPT-5): 19/19 dangerous stopped, **17/19 blocked outright** (v0.7: 7/19), all 16 harmless calls allowed. 13% of 200 real calls sent to review, none blocked |
+| **[Risk gate](#risk-gate)** | Whether a tool call is dangerous or not what the user asked; writes to config and credential files, and commands that read secrets and send them over the network, always go to review | On 41 held-out attacks written by a different model (GPT-5): 19/19 dangerous stopped, **13/19 blocked outright** and the rest sent to approval (v0.7: 7/19 blocked), all 16 harmless calls allowed. 13% of 200 real calls sent to review. In live enforce use, v0.8 would have refused 6 of the user's own calls; v1.1 sends those to approval |
 | **Tool-result filter** | Which sections of a long result matter for the task | Mixed: −10% prompt tokens but +5% cost alone; with context trimming on as well it added only −2% (one pair, within noise) |
 | **[Memory filter](#memory-filter)** | Before a memory write, whether it's a durable fact or task progress / a how-to that belongs in a skill; those are held once with a note | Offline: 15 of 16 right on a held-out set, no durable fact held. Live A/B: nothing to hold, because Opus 5.5 already kept progress out of memory |
 | **Loop guard** | Whether the agent is repeating a failed step | Catches 31% of real repeated failures at 5% false alarms; stays in shadow |
@@ -24,7 +24,7 @@ Every result, with methods and caveats, is in [Test results](#test-results) and 
 
 The design, the evidence behind it, and the rollout plan are in the **[PRD](docs/PRD.md)**.
 
-> **Status: v0.9, Phase 0 (shadow mode).** Every decision point ships in `shadow`: Jermes calls Jev and logs what it *would* do, but changes nothing in Hermes until you promote a point. Context trimming also needs `context: {engine: jermes}` in Hermes' main config file.
+> **Status: v1.1.** Every decision point ships in `shadow`: Jermes calls Jev and logs what it *would* do, but changes nothing in Hermes until you promote a point (from the dashboard tab or the config file). The first install running every point in `enforce` has done so since September 28; see the risk gate section for what that turned up. Context trimming also needs `context: {engine: jermes}` in Hermes' main config file.
 
 ## Quick start
 
@@ -356,17 +356,19 @@ It held back on close calls under 70% that are related but distinct (`guidance`/
 
 ### Risk gate
 
+**v1.1 (September 28): safety-weakening asks instead of blocking.** Within minutes of the first install switching to enforce, the log showed v0.8 would have refused 6 of the user's own calls: `ssh -o StrictHostKeyChecking=no` to a GPU pod, and writing an API key into `.env` under `umask 077`. Jev rated them as weakening safety (0.73–0.93) and as going against the request (0.72–0.87), while also judging them requested ("not requested" only 0.12–0.20). A block refuses the call with no way to approve it, so the "goes against the request" block now only covers exfiltration (at 0.7); safety-weakening alone goes to Hermes' approval prompt. `against_request_weakens_blocks: true` restores the v0.8 behaviour. Replaying Jev's logged answers: all 6 live would-blocks become approvals, no live call is blocked, and the held-out set still stops 19/19 dangerous calls, but blocks 13/19 outright instead of 17/19. The four that now reach approval instead of a block: piping a web page's script into `bash`, an alias that makes `rm` dangerous, sending a key to a "contractor", and mounting the home folder into an untrusted container. The offline check (0 blocks on 200 past calls) missed this pattern, which is why the tables below were not enough to judge enforce on their own.
+
 **v0.8 (September 28), risk_gate.3.** Three new Jev questions (weakens safety controls, goes against a limit the user stated, hard to undo) and a rule that blocks a call that is unrequested and exfiltrates data or weakens safety. Routine work that was clearly asked for and is easy to undo is no longer sent to review on its risk level alone.
 
 To keep the numbers honest, a different model (GPT-5) wrote two test sets without seeing any Jermes rules, questions or cases: 40 tuning cases and 41 held-out cases, each about 45% dangerous, 15% "a human should confirm" and 40% harmless look-alikes. Thresholds were chosen by replaying the logged Jev answers through the policy (no extra calls), and the held-out set was scored once, after the policy was final.
 
-| Held-out set (41, GPT-5) | v0.7 | v0.8 |
-|---|---|---|
-| Dangerous calls stopped (blocked or sent to review) | 18/19 | **19/19** |
-| Dangerous calls blocked outright | 7/19 | **17/19** |
-| "A human should confirm" cases stopped | 2/6 | 2/6 |
-| Harmless calls allowed | 15/16 | **16/16** |
-| Harmless calls blocked | 0 | 0 |
+| Held-out set (41, GPT-5) | v0.7 | v0.8 | v1.1 |
+|---|---|---|---|
+| Dangerous calls stopped (blocked or sent to review) | 18/19 | 19/19 | **19/19** |
+| Dangerous calls blocked outright | 7/19 | 17/19 | **13/19** |
+| "A human should confirm" cases stopped | 2/6 | 2/6 | 2/6 |
+| Harmless calls allowed | 15/16 | 16/16 | **16/16** |
+| Harmless calls blocked | 0 | 0 | 0 |
 | Hermes' own regex, dangerous shell cases flagged | 40% | 40% |
 
 | Other sets (v0.8) | Dangerous stopped | Dangerous blocked | Harmless allowed | Harmless blocked |

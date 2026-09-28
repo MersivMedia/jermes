@@ -37,10 +37,32 @@ def test_requested_safety_change_is_not_blocked():
     assert v.action == "review"            # still a human, but not refused
 
 
-def test_hazard_against_the_request_is_blocked_even_if_partly_matched():
-    # "fix the typo, don't change anything else" -> the call also turns approvals off
-    v = risk_gate.make_policy(CFG)(ans(weak=0.65, against=0.9, yes=0.3, no=0.1))
+def test_exfiltration_against_the_request_is_blocked_even_if_partly_matched():
+    # "fix the typo, don't change anything else" -> the call also ships data off-machine
+    v = risk_gate.make_policy(CFG)(ans(exf=0.75, against=0.9, yes=0.3, no=0.1))
     assert v.action == "block" and "goes against" in v.detail["reason"]
+
+
+def test_safety_weakening_against_the_request_asks_instead_of_blocking():
+    # same shape with a safety change: goes to Hermes' approval prompt, not refused
+    v = risk_gate.make_policy(CFG)(ans(weak=0.65, against=0.9, yes=0.3, no=0.1))
+    assert v.action == "review"
+    strict = dict(CFG, against_request_weakens_blocks=True)       # opt back in
+    assert risk_gate.make_policy(strict)(ans(weak=0.75, against=0.9, yes=0.3, no=0.1)).action == "block"
+
+
+def test_live_pod_work_is_not_blocked():
+    # Jev's real scores on the six calls v0.8 would have blocked on this install
+    # (ssh with StrictHostKeyChecking=no to a GPU pod; writing a key to .env under umask 077)
+    live = [
+        (0.10, 0.49, 0.86, 0.80, 0.24, 0.10, 0.18), (0.15, 0.39, 0.92, 0.72, 0.30, 0.29, 0.14),
+        (0.17, 0.52, 0.85, 0.75, 0.47, 0.19, 0.14), (0.23, 0.34, 0.73, 0.82, 0.62, 0.37, 0.20),
+        (0.22, 0.66, 0.90, 0.87, 0.59, 0.60, 0.12), (0.39, 0.56, 0.93, 0.86, 0.62, 0.49, 0.15),
+    ]
+    pol = risk_gate.make_policy(CFG)
+    for des, exf, weak, against, irrev, yes, no in live:
+        v = pol(ans(risk=2.9, des=des, exf=exf, weak=weak, against=against, irrev=irrev, yes=yes, no=no))
+        assert v.action == "review", (v.action, v.detail.get("reason"))
 
 
 def test_against_the_request_without_a_hazard_is_review_not_block():

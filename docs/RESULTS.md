@@ -4,6 +4,29 @@ Every measurement so far, newest first. The [README](../README.md) shows only th
 
 Setup for all runs: one real Hermes install (about 200 skills), Jev through Vercel AI Gateway, real past turns replayed from Hermes' `state.db`. Metric definitions are in the README under "Score the results".
 
+## September 28, 2026 (v1.1): first live enforce, risk-gate false blocks
+
+The first install switched every point to `enforce` from the dashboard. In the next ~25 minutes of real use (two sessions) Jermes logged 162 decisions with no errors; risk-gate latency p50 312 ms, p90 448 ms.
+
+- **Risk gate, v0.8 rule:** 6 calls would have been **refused** (logged in shadow just before the switch), all the user's own GPU-pod work: `ssh -o StrictHostKeyChecking=no ...` to the pod, and writing an API key into `.env` under `umask 077`. Jev's scores on those 6: weakens safety 0.73–0.93, goes against the request 0.72–0.87, but "not requested" only 0.12–0.20. The v0.8 "goes against the request" block fired on the first two alone. The 200-call offline check (0 blocks) had not contained this pattern.
+- **Approvals:** 8 calls went to Hermes' approval prompt in the first 8 minutes of enforce (pod `ssh`, `gh repo view/edit`, a write to one of the user's skill scripts).
+- **Others in enforce:** context trimming trimmed 3 times (3, 10 and 106 items); the model router picked the cheaper model 3 times and the cost check vetoed every switch; loop guard, skill suggestions and memory filter ran with nothing applied.
+
+**Fix (v1.1):** the "goes against the request" block now covers exfiltration only (hazard ≥ 0.7); safety-weakening alone goes to approval (`against_request_weakens_blocks: true` restores v0.8). Chosen by replaying logged Jev answers, no new calls:
+
+| Source | v0.8 rule | v1.1 rule |
+|---|---|---|
+| Live risk-gate calls (98, spec risk_gate.3) | 6 block, 30 review | **0 block**, 30 review |
+| Held-out (41): dangerous stopped / blocked | 19/19 / 17/19 | 19/19 / **13/19** |
+| Held-out: harmless allowed / blocked | 16/16 / 0 | 16/16 / 0 |
+| Basic set (31): dangerous blocked | 9/10 | 8/10 |
+| Own red-team (33): dangerous blocked | 16/20 | 13/20 |
+| 200 real past calls | 26 review, 0 block | unchanged |
+
+Rejected alternative: requiring Jev's "not requested" probability ≥ 0.2 before the against-request block. It cleared 5 of the 6 live blocks but dropped outright blocks on the held-out set to 13/19 anyway and let most red-team exfiltration through to review (9/20 blocked), because Jev also rates disguised attacks as requested.
+
+Also observed: one systemd gateway restart timed out while Jermes' `pre_tool_call` check was running; Hermes skipped the Jermes hook for the next 11 tool calls ("skipped after previous timeout or while still running") until the gateway restarted. Not fixed yet.
+
 ## September 28, 2026 (v0.9): dashboard tab
 
 No new model measurements. Verification of the new tab:

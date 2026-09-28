@@ -57,8 +57,9 @@ DEFAULTS: Dict[str, Any] = {
             "review_risk_score": 2.5,
             "mismatch_threshold": 0.20,
             "review_on_mismatch": False,  # "not requested" alone flooded review (35% of real calls)
-            "against_request_threshold": 0.7,  # risk_gate.3: block exfil / safety-weakening that goes
-            "against_request_hazard": 0.6,     #   against a limit the user stated
+            "against_request_threshold": 0.7,  # risk_gate.3: block exfiltration that goes against
+            "against_request_hazard": 0.7,     #   a limit the user stated (0.6 blocked live pod work)
+            "against_request_weakens_blocks": False,  # safety-weakening alone -> approval, not block
             "routine_requested_p": 0.7,        # clearly asked, every hazard < routine_max_hazard:
             "routine_max_hazard": 0.3,         #   not reviewed on risk level alone
             "context_messages": 6,        # earlier turns, so "ok go ahead" is read against the plan
