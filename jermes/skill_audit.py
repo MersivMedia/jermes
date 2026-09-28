@@ -44,11 +44,27 @@ def audit(engine: Any, roster: Sequence[Skill], *, scope: str = "local", thresho
         if hits:
             progress(f"  [{i + 1}/{len(targets)}] {target.name}: " +
                      ", ".join(f"{m.name} ({m.relation}, {m.same_job:.0%})" for m in hits))
-    groups = [so.suggest(g, sources, sizes) for g in so.group_pairs(list(pairs.values()))]
+    by_name = {s.name: s for s in roster}
+    groups = []
+    for g in so.group_pairs(list(pairs.values())):
+        contains = {n: 0 for n in g.members}
+        for a, b, rel, _ in g.pairs:
+            if rel == "target_contains":
+                contains[b] += 1
+            elif rel == "existing_contains":
+                contains[a] += 1
+        pool = [n for n in g.members if sources.get(n, "local") != "local"] or list(g.members)
+        top = max(contains[n] for n in pool)
+        tied = [n for n in pool if contains[n] == top]
+        breadth = so.rank_breadth(engine, g, by_name) if len(tied) > 1 else {}
+        g = so.suggest(g, sources, sizes, breadth)
+        g.breadth = {k: round(v, 3) for k, v in breadth.items()}
+        groups.append(g)
     return {
         "scope": scope, "threshold": threshold, "skills_checked": len(checked), "errors": errors,
         "seconds": round(time.monotonic() - t0, 1),
         "groups": [{"members": g.members, "keep": g.keep, "suggestion": g.suggestion,
+                    "breadth": g.breadth,
                     "pairs": [{"a": a, "b": b, "relation": r, "same_job": round(p, 3)} for a, b, r, p in g.pairs],
                     "sources": {n: sources.get(n, "local") for n in g.members}} for g in groups],
         "checked": checked,

@@ -84,3 +84,42 @@ def test_clean_env_drops_parent_session(tmp_path, monkeypatch):
     assert "_HERMES_GATEWAY" not in on and "HERMES_SESSION_ID" not in on and "JERMES_MODE" not in on
     assert on["AI_GATEWAY_API_KEY"] == "k" and on["PATH"] == "/usr/bin"
     assert "AI_GATEWAY_API_KEY" not in ab.clean_env(tmp_path, tmp_path, "off")
+
+
+def test_memory_task_home_and_check(tmp_path, monkeypatch):
+    import yaml
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / ".env").write_text("ANTHROPIC_API_KEY=x\n")
+    on = ab._make_home(src, "on", {"mem": "advise"}, memory=True)
+    off = ab._make_home(src, "off", {}, memory=False)
+    assert yaml.safe_load((on / "config.yaml").read_text())["memory"]["memory_enabled"] is True
+    assert yaml.safe_load((off / "config.yaml").read_text())["memory"]["memory_enabled"] is False
+    assert "memory_filter: {mode: advise}" in (on / "jermes" / "config.yaml").read_text()
+    task = {t.name: t for t in TASKS}["memory"]
+    assert task.memory and task.fresh_at == (2,)
+    d = tmp_path / "w"
+    d.mkdir()
+    task.setup(d)
+    (d / "calc.py").write_text("def average(xs):\n    return sum(xs) / len(xs)\n")
+    (d / "answer1.txt").write_text("Europe/Lisbon")
+    (d / "answer2.txt").write_text("4 spaces")
+    assert task.check(d)[0]
+    (d / "answer2.txt").write_text("tabs")
+    assert not task.check(d)[0]
+
+
+def test_skills_are_copied_not_linked(tmp_path, monkeypatch):
+    # an A/B agent once patched a real skill through a symlinked skills dir
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path))
+    src = tmp_path / "src"
+    (src / "skills" / "dev" / "x").mkdir(parents=True)
+    (src / "skills" / "dev" / "x" / "SKILL.md").write_text("original")
+    (src / "skills" / ".archive" / "old").mkdir(parents=True)
+    (src / ".env").write_text("ANTHROPIC_API_KEY=x\n")
+    home = ab._make_home(src, "on", {"trim": "off"})
+    assert not (home / "skills").is_symlink()
+    (home / "skills" / "dev" / "x" / "SKILL.md").write_text("changed by a test agent")
+    assert (src / "skills" / "dev" / "x" / "SKILL.md").read_text() == "original"
+    assert not (home / "skills" / ".archive").exists()

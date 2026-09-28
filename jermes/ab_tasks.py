@@ -29,6 +29,8 @@ class Task:
     exercises: str
     followups: List[str] = field(default_factory=list)   # later turns in the same session
     pause_s: float = 0.0                                  # wait before each follow-up (cache expiry)
+    memory: bool = False                                  # Hermes memory on in this task's home
+    fresh_at: Tuple[int, ...] = ()                        # turn indexes that start a new session
 
 
 def _answer(d: Path) -> str:
@@ -274,6 +276,31 @@ def _check_recall(d: Path) -> Tuple[bool, str]:
     return ok, f"answer1={a1[:40]!r} answer2={a2[:40]!r} calc_fixed={fixed}"
 
 
+# ---------------------------------------------------------------- memory (two sessions)
+
+def _check_memory(d: Path) -> Tuple[bool, str]:
+    a1 = (d / "answer1.txt").read_text().strip().lower() if (d / "answer1.txt").exists() else ""
+    a2 = (d / "answer2.txt").read_text().strip().lower() if (d / "answer2.txt").exists() else ""
+    tz = "europe/lisbon" in a1
+    indent = "4" in a2 and "space" in a2 and "tab" not in a2.replace("no tab", "").replace("never tab", "")
+    fixed, _ = _check_fix(d)
+    return tz and indent and fixed, f"answer1={a1[:30]!r} answer2={a2[:40]!r} calc_fixed={fixed}"
+
+
+MEMORY_TURNS = [
+    "Before we start, some things to remember about me for future sessions: I'm based in Lisbon (timezone "
+    "Europe/Lisbon), I use 4-space indentation and never tabs, and I want commit messages in the imperative "
+    "mood with no emoji. Now: the test in test_calc.py fails. Fix calc.py so it passes. Don't change the test.",
+    "Thanks. Some status while I have you: the v1.4 deploy went out this morning, QA signed off at 11:00, the "
+    "staging database migration finished, and next week we start the billing rewrite. Keep track of where we "
+    "are in memory so you can pick up next time. And save the steps you just used to find and fix the calc "
+    "bug so you can repeat them.",
+    # new session: only memory carries over
+    "New session. Without asking me, write my timezone (IANA name) to answer1.txt and my indentation "
+    "preference (tabs or spaces, and how many) to answer2.txt, using what you remember about me.",
+]
+
+
 TASKS: List[Task] = [
     Task("big_log", "logs/app.log is our service log from this morning. Find the error that crashed the service "
          "and write only the name of the failing component to answer.txt.", _setup_big_log, _check_big_log,
@@ -318,6 +345,9 @@ TASKS: List[Task] = [
              "Write only the number to answer2.txt.",
          ],
          pause_s=330.0),
+    Task("memory", MEMORY_TURNS[0], _setup_fix, _check_memory,
+         "memory_filter (memory on; durable preferences plus progress/procedure bait; a new session reads memory)",
+         followups=MEMORY_TURNS[1:], memory=True, fresh_at=(2,)),
 ]
 
 BY_NAME = {t.name: t for t in TASKS}

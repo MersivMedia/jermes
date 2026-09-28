@@ -158,3 +158,44 @@ def test_audit_prefers_bundled_keeper(make_engine, fake, monkeypatch):
     g = so.Group(members=["my-pdf", "pdf"], pairs=[("my-pdf", "pdf", "duplicate", 0.9)])
     out = so.suggest(g, {"my-pdf": "local", "pdf": "bundled"}, {"my-pdf": 5000, "pdf": 100})
     assert out.keep == "pdf" and "archive it" in out.suggestion and "bundled" in out.suggestion
+
+
+def test_breadth_beats_length_when_containment_ties():
+    # the case from the first live audit: partial overlap, longer skill is the narrower one
+    g = so.Group(members=["vercel-fixes", "deploy-troubleshooting"],
+                 pairs=[("vercel-fixes", "deploy-troubleshooting", "partial", 0.72)])
+    sizes = {"vercel-fixes": 8400, "deploy-troubleshooting": 7000}
+    assert so.suggest(g, {}, sizes).keep == "vercel-fixes"                 # length only: old behaviour
+    out = so.suggest(g, {}, sizes, {"vercel-fixes": 0.2, "deploy-troubleshooting": 0.8})
+    assert out.keep == "deploy-troubleshooting"
+
+
+def test_containment_still_beats_breadth():
+    g = so.Group(members=["a", "b"], pairs=[("a", "b", "target_contains", 0.9)])   # b contains a
+    assert so.suggest(g, {}, {"a": 9000, "b": 10}, {"a": 0.9, "b": 0.1}).keep == "b"
+
+
+def test_audit_asks_breadth_only_on_a_tie(make_engine, fake, monkeypatch):
+    roster = [Skill("narrow", "Vercel build fixes", "detail " * 300), Skill("broad", "Deploy troubleshooting", "x " * 50)]
+    asked = []
+
+    def respond(qid, q, state):
+        if qid == "broader":
+            asked.append(state)
+            return {"type": "choice", "choice": "s1", "probabilities": {"s0": 0.2, "s1": 0.8}, "confidence": 0.8}
+        tgt = state["target"]["name"]
+        if qid == "which":
+            other = "broad" if tgt == "narrow" else "narrow"
+            probs = {o: (0.7 if o == other else 0.0) for o in q["criteria"]}
+            probs[so.NONE_OPTION] = 0.3
+            return {"type": "choice", "choice": other, "probabilities": probs, "confidence": 0.7}
+        kind, i = qid.split("_")
+        if kind == "rel":
+            return {"type": "choice", "choice": "partial", "probabilities": {"partial": 0.9}, "confidence": 0.9}
+        return {"type": "noul", "noul": 0.75}
+
+    fake.on(respond)
+    monkeypatch.setattr(so, "skill_sources", lambda r: {s.name: "local" for s in r})
+    rep = skill_audit.audit(make_engine(skill_overlap="shadow"), roster, progress=lambda s: None)
+    g = rep["groups"][0]
+    assert len(asked) == 1 and g["keep"] == "broad" and g["breadth"]["broad"] == 0.8

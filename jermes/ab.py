@@ -48,6 +48,8 @@ points:
   risk_gate: {{mode: {guards}}}
   loop_guard: {{mode: {guards}}}
   model_router: {{mode: off}}
+  memory_filter: {{mode: {mem}}}
+  skill_overlap: {{mode: off}}
 """
 
 
@@ -61,6 +63,7 @@ class Run:
     seconds: float = 0.0
     exit_code: int = 0
     model: str = ""
+    memory_chars: int = 0
     api_calls: int = 0
     input_tokens: int = 0
     cache_read_tokens: int = 0
@@ -108,7 +111,7 @@ def clean_env(home: Path, work: Path, arm: str) -> Dict[str, str]:
 
 
 def _make_home(src: Path, arm: str, points: Dict[str, str],
-               base_points: Optional[Dict[str, str]] = None) -> Path:
+               base_points: Optional[Dict[str, str]] = None, memory: bool = False) -> Path:
     """``base_points``: when set, the "off" arm also runs Jermes, with these
     point modes (compare two Jermes setups instead of Jermes vs none)."""
     home = Path(tempfile.mkdtemp(prefix=f"jermes-ab-{arm}-"))
@@ -128,10 +131,14 @@ def _make_home(src: Path, arm: str, points: Dict[str, str],
     except Exception:
         pass
     cfg.setdefault("agent", {})["max_turns"] = 40
-    cfg["memory"] = {"memory_enabled": False, "user_profile_enabled": False}
+    cfg["memory"] = {"memory_enabled": memory, "user_profile_enabled": memory}
     cfg["approvals"] = {"mode": "off"}
     if (src / "skills").exists():
-        os.symlink(src / "skills", home / "skills", target_is_directory=True)
+        # A copy, never a symlink: test agents create and patch skills, and a
+        # symlink let one A/B run write into the user's real library.
+        shutil.copytree(src / "skills", home / "skills", symlinks=True,
+                        ignore=shutil.ignore_patterns(".archive", ".curator_backups", "__pycache__", "*.pyc",
+                                                      ".curator_ledger.jsonl", ".locks"))
     if arm == "off" and base_points:
         points, arm_uses_plugin = base_points, True
     else:
@@ -141,7 +148,7 @@ def _make_home(src: Path, arm: str, points: Dict[str, str],
         os.symlink(REPO, home / "plugins" / "jermes", target_is_directory=True)
         cfg["plugins"] = {"enabled": ["jermes"]}
         (home / "jermes").mkdir()
-        (home / "jermes" / "config.yaml").write_text(ON_CONFIG.format(**{"trim": "off", "guards": "shadow", **points}))
+        (home / "jermes" / "config.yaml").write_text(ON_CONFIG.format(**{"skill": "off", "filt": "off", "trim": "off", "guards": "shadow", "mem": "off", **points}))
         if points.get("trim", "off") != "off":
             cfg["context"] = {"engine": "jermes"}
     (home / "config.yaml").write_text(yaml.safe_dump(cfg, sort_keys=False))
@@ -183,7 +190,7 @@ def _jev_usage(home: Path) -> Dict[str, Any]:
 
 def run_one(task: Task, arm: str, repeat: int, *, src_home: Path, points: Dict[str, str], timeout: int,
             keep: bool = False, base_points: Optional[Dict[str, str]] = None) -> Run:
-    home = _make_home(src_home, arm, points, base_points)
+    home = _make_home(src_home, arm, points, base_points, memory=task.memory)
     work = Path(tempfile.mkdtemp(prefix=f"jermes-ab-work-{task.name}-"))
     task.setup(work)
     run = Run(task.name, arm, repeat)
@@ -193,7 +200,8 @@ def run_one(task: Task, arm: str, repeat: int, *, src_home: Path, points: Dict[s
     for i, prompt in enumerate(prompts):
         if i:
             time.sleep(task.pause_s)
-        argv = _hermes_bin() + ["chat", "-Q", "--yolo"] + (["--continue"] if i else []) + ["-q", prompt]
+        cont = i and i not in task.fresh_at
+        argv = _hermes_bin() + ["chat", "-Q", "--yolo"] + (["--continue"] if cont else []) + ["-q", prompt]
         try:
             p = subprocess.run(argv, cwd=work, env=env, capture_output=True, text=True, timeout=timeout,
                                stdin=subprocess.DEVNULL)
@@ -211,6 +219,8 @@ def run_one(task: Task, arm: str, repeat: int, *, src_home: Path, points: Dict[s
     if usage:
         for k, v in usage.items():
             setattr(run, k, v or (0 if k != "model" else ""))
+    mem = home / "memories"
+    run.memory_chars = sum(len(f.read_text()) for f in mem.glob("*.md")) if mem.exists() else 0
     jev = _jev_usage(home)
     run.jev_tokens, run.applied = int(jev["jev_tokens"]), jev["applied"]
     run.jev_usd = run.jev_tokens * JEV_INPUT_PER_M / 1e6
@@ -272,7 +282,7 @@ def run_ab(task_names: List[str], repeats: int = 1, *, points: Optional[Dict[str
                     progress(f"  {task.name:<14} {arm:<3} rep{rep}  {'PASS' if r.ok else 'FAIL'}  "
                              f"{r.api_calls:>3} calls  {r.prompt_tokens / 1e3:>7.1f}k prompt  "
                              f"{r.output_tokens / 1e3:>5.1f}k out  ${r.total_usd:.4f}  {r.seconds:>5.0f}s"
-                             + (f"  applied={r.applied}" if r.applied else "") + (f"  ERR {r.error[:80]}" if r.error else ""))
+                             + (f"  applied={r.applied}" if r.applied else "") + (f"  memory={r.memory_chars}ch" if r.memory_chars else "") + (f"  ERR {r.error[:80]}" if r.error else ""))
                 if out_path:
                     out_path.write_text(json.dumps([asdict(x) for x in runs], indent=1))
     return runs

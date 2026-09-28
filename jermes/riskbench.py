@@ -48,7 +48,8 @@ def decide(engine: Engine, tool: str, args: Dict[str, Any], request: str, previo
                                         secret_sink=risk_gate.sends_secret(tool, args)),
                       session_id=session, spec_version=risk_gate.SPEC_VERSION, log_detail={"tool": tool})
     return {"action": d.action or "error", "error": d.error, "detail": d.detail, "latency_ms": d.latency_ms,
-            "tokens": d.input_tokens}
+            "tokens": d.input_tokens, "protected": risk_gate.touches_protected(tool, args),
+            "secret_sink": risk_gate.sends_secret(tool, args)}
 
 
 def score_cases(engine: Engine, cases: List[Case] = CASES, progress=print) -> Dict[str, Any]:
@@ -57,7 +58,11 @@ def score_cases(engine: Engine, cases: List[Case] = CASES, progress=print) -> Di
         r = decide(engine, c.tool, c.args, c.request, c.previous_result)
         rx = hermes_regex(c.tool, c.args)
         rows.append({"cid": c.cid, "kind": c.kind, "label": c.label, "jev": r["action"], "regex": rx,
-                     "reason": r["detail"].get("reason"), "error": r["error"]})
+                     "reason": r["detail"].get("reason"), "error": r["error"],
+                     "scores": {k: r["detail"].get(k) for k in ("risk_score", "risk_confidence", "hazards", "matches_request",
+                                                                "p_not_requested", "p_requested", "against_request",
+                                                                "irreversible")},
+                     "protected": r["protected"], "secret_sink": r["secret_sink"]})
         if progress:
             mark = "ok " if r["action"] == c.label else "   "
             progress(f"  {mark}{c.cid:<18} label={c.label:<6} jev={r['action']:<6} "
@@ -88,6 +93,13 @@ def score_cases(engine: Engine, cases: List[Case] = CASES, progress=print) -> Di
         },
         "rows": rows,
     }
+
+
+def load_cases(path: Path) -> List[Case]:
+    """Cases from a JSON file: {"cases": [{cid, tool, args, request, label, kind, previous_result}]}."""
+    data = json.loads(Path(path).read_text())
+    return [Case(c["cid"], c["tool"], c["args"], c["request"], c["label"], c.get("kind", ""),
+                 previous_result=c.get("previous_result") or "") for c in data["cases"]]
 
 
 def real_calls(db: Path, n: int, seed: int = 7) -> List[Dict[str, Any]]:
@@ -135,6 +147,7 @@ def score_real(engine: Engine, calls: List[Dict[str, Any]], progress=print) -> D
     regex_n = 0
     flagged = []
     lat = []
+    scored = []
     for i, c in enumerate(calls):
         r = decide(engine, c["tool"], c["args"], c["request"], session=f"riskbench:{c['session']}",
                    context=c.get("context", ""))
@@ -148,6 +161,12 @@ def score_real(engine: Engine, calls: List[Dict[str, Any]], progress=print) -> D
         if r["action"] in ("block", "review"):
             flagged.append({"action": r["action"], "tool": c["tool"], "reason": r["detail"].get("reason"),
                             "hermes_regex": rx, "args": json.dumps(c["args"])[:200]})
+        if not r["error"]:
+            scored.append({"tool": c["tool"], "action": r["action"], "protected": r["protected"],
+                           "secret_sink": r["secret_sink"], "args": json.dumps(c["args"])[:160],
+                           **{k: r["detail"].get(k) for k in ("risk_score", "risk_confidence", "hazards",
+                                                               "matches_request", "p_not_requested", "p_requested",
+                                                               "against_request", "irreversible")}})
         if progress and (i + 1) % 25 == 0:
             progress(f"  real calls {i + 1}/{len(calls)}: {counts}")
     done = sum(v for k, v in counts.items() if k != "error")
@@ -160,4 +179,5 @@ def score_real(engine: Engine, calls: List[Dict[str, Any]], progress=print) -> D
         "latency_ms_p50": round(lat[len(lat) // 2]) if lat else None,
         "latency_ms_p90": round(lat[int(len(lat) * 0.9)]) if lat else None,
         "flagged": flagged,
+        "scored": scored,
     }

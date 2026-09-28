@@ -211,6 +211,7 @@ class Group:
     pairs: List[Tuple[str, str, str, float]] = field(default_factory=list)  # a, b, relation, same_job
     suggestion: str = ""
     keep: str = ""
+    breadth: Dict[str, float] = field(default_factory=dict)
 
 
 def group_pairs(pairs: Sequence[Tuple[str, str, str, float]]) -> List[Group]:
@@ -235,8 +236,40 @@ def group_pairs(pairs: Sequence[Tuple[str, str, str, float]]) -> List[Group]:
     return sorted(groups.values(), key=lambda g: (-len(g.members), -max(p for *_, p in g.pairs)))
 
 
-def suggest(group: Group, sources: Mapping[str, str], sizes: Mapping[str, int]) -> Group:
-    """Pick which skill to keep and phrase the suggestion. Pure code, no model call."""
+def broader_question(members: Sequence[str]) -> Dict[str, Any]:
+    return {"broader": Choice(
+        instructions="These skills overlap and will be merged into one. Which one has the broadest scope, so the "
+                     "others fit inside it as sections? Judge by the range of situations each one handles, not by "
+                     "length or level of detail.",
+        criteria={f"s{i}": f"`skills.s{i}` is the broadest" for i in range(len(members))})}
+
+
+def rank_breadth(engine: Any, group: "Group", by_name: Mapping[str, Skill], *,
+                 session_id: str = "") -> Dict[str, float]:
+    """Jev's probability that each member is the broadest ({} on error)."""
+    members = [m for m in group.members if m in by_name]
+    if len(members) < 2:
+        return {}
+    state = {"skills": {f"s{i}": card(by_name[m]) for i, m in enumerate(members)}}
+    d = engine.decide(f"{POINT}.breadth", state, broader_question(members), lambda a: Verdict("scored"),
+                      spec_version=SPEC_VERSION, session_id=session_id)
+    if d.error:
+        return {}
+    probs = d.answers["broader"].probabilities or {}
+    return {m: float(probs.get(f"s{i}", 0.0)) for i, m in enumerate(members)}
+
+
+def suggest(group: Group, sources: Mapping[str, str], sizes: Mapping[str, int],
+            breadth: Optional[Mapping[str, float]] = None) -> Group:
+    """Pick which skill to keep and phrase the suggestion. Pure code, no model call.
+
+    Order: bundled/hub first (Hermes overwrites those on update), then the skill
+    the pair judgements say contains the others, then the one Jev rates
+    broadest (``breadth``, asked only when containment doesn't decide), then
+    length as a last resort. Length alone picked the narrower skill in the
+    first live audit: the longer one was longer because it was more detailed.
+    """
+    breadth = breadth or {}
     local = [n for n in group.members if sources.get(n, "local") == "local"]
     fixed = [n for n in group.members if sources.get(n, "local") != "local"]
     contains: Dict[str, int] = {n: 0 for n in group.members}
@@ -246,7 +279,7 @@ def suggest(group: Group, sources: Mapping[str, str], sizes: Mapping[str, int]) 
         elif rel == "existing_contains":
             contains[a] += 1
     if fixed:
-        keep = max(fixed, key=lambda n: (contains[n], sizes.get(n, 0)))
+        keep = max(fixed, key=lambda n: (contains[n], breadth.get(n, 0.0), sizes.get(n, 0)))
         retire = [n for n in local]
         group.keep = keep
         group.suggestion = (f"Keep {keep} ({sources.get(keep)} skill). Move anything unique from "
@@ -254,7 +287,7 @@ def suggest(group: Group, sources: Mapping[str, str], sizes: Mapping[str, int]) 
                             f"{'them' if len(retire) > 1 else 'it'}." if retire else
                             f"All are {sources.get(keep)} skills; disable the ones you don't use.")
         return group
-    keep = max(local, key=lambda n: (contains[n], sizes.get(n, 0)))
+    keep = max(local, key=lambda n: (contains[n], breadth.get(n, 0.0), sizes.get(n, 0)))
     others = [n for n in group.members if n != keep]
     group.keep = keep
     group.suggestion = (f"Merge into {keep}: fold the unique parts of {', '.join(others)} into it "

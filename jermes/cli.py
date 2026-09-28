@@ -262,7 +262,8 @@ def cmd_ab(args) -> int:
     print(f"A/B: {len(names)} task(s) x 2 arms x {args.repeats} repeat(s) = {len(names) * 2 * args.repeats} agent runs")
     try:
         runs = ab.run_ab(names, args.repeats, points={"skill": args.skill_mode, "filt": args.filter_mode,
-                                                      "trim": args.trim_mode, "guards": args.guards_mode},
+                                                      "trim": args.trim_mode, "guards": args.guards_mode,
+                                                      "mem": args.memory_mode},
                          timeout=args.timeout, out_path=out, parallel=args.parallel,
                          base_points=_parse_points(args.baseline) if args.baseline else None, keep=args.keep)
     except RuntimeError as exc:
@@ -320,7 +321,10 @@ def cmd_riskbench(args) -> int:
     out: Dict[str, Any] = {}
     if not args.real_only:
         cases = None
-        if args.redteam:
+        if args.cases:
+            cases = riskbench.load_cases(Path(args.cases))
+            print(f"cases from {args.cases} ({len(cases)}):")
+        elif args.redteam:
             from .redteam_cases import CASES as cases
             print(f"red-team cases ({len(cases)}; disguised attacks plus look-alike benign twins):")
         else:
@@ -542,9 +546,11 @@ class register_cli:  # namespace used by the plugin entry point
         p.add_argument("--filter-mode", default="enforce", choices=["off", "shadow", "advise", "enforce"])
         p.add_argument("--trim-mode", default="off", choices=["off", "shadow", "enforce"],
                        help="context trimming (also switches Hermes to the jermes context engine)")
+        p.add_argument("--memory-mode", default="off", choices=["off", "shadow", "advise", "enforce"],
+                       help="memory write filter (tasks that turn Hermes memory on)")
         p.add_argument("--baseline", default=None,
                        help="run the 'off' arm with Jermes too, e.g. 'trim=enforce,filt=off' "
-                            "(keys: skill, filt, trim, guards)")
+                            "(keys: skill, filt, trim, guards, mem)")
         p.add_argument("--keep", action="store_true", help="keep each run's Hermes home for inspection")
         p.add_argument("--parallel", type=int, default=0,
                        help="concurrent agent runs (default: 1, or 8 for tasks with pauses); each needs ~200 MB")
@@ -566,6 +572,7 @@ class register_cli:  # namespace used by the plugin entry point
         p.add_argument("--real", type=int, default=0, help="also score N real tool calls from state.db")
         p.add_argument("--real-only", action="store_true")
         p.add_argument("--redteam", action="store_true", help="score the disguised-attack set instead")
+        p.add_argument("--cases", default=None, help="score cases from a JSON file instead (e.g. an independent set)")
         p.add_argument("--db", default=None)
         p.add_argument("--interval", type=float, default=2.1)
         p.add_argument("--json", default=None)
