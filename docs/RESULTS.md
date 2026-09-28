@@ -1,8 +1,166 @@
 # Jermes test results
 
-Every measurement so far, newest first. The [README](../README.md) shows only the current numbers.
+Current results first, then every measurement so far, newest first. The [README](../README.md) shows only the headline numbers.
 
-Setup for all runs: one real Hermes install (about 200 skills), Jev through Vercel AI Gateway, real past turns replayed from Hermes' `state.db`. Metric definitions are in the README under "Score the results".
+Setup for all runs: one real Hermes install (about 200 skills), Jev through Vercel AI Gateway, real past turns replayed from Hermes' `state.db`. Metric definitions are in [MEASURING.md](MEASURING.md#score-the-results).
+
+
+## Current results (v1.1.1)
+
+### Live savings: first install in enforce (September 28, 2026)
+
+Every decision point was switched to `enforce` at 01:54 UTC. Over the next 3.5 hours of normal use (19 sessions, including a TUI game build and a long Telegram session):
+
+| | |
+|---|---|
+| Context trims applied | 27, across 19 sessions (up to 646k characters of old tool output at once) |
+| Model calls that carried a trimmed context | 403 |
+| Estimated saving | **$11–13** at Claude Opus 5.5 list prices |
+| Jev cost for all 1,148 decisions | $0.15 |
+
+Method: for each trim, the removed characters (3.5–4 characters per token) priced as one cache write ($5/M) plus a cache read ($0.20/M) on every later call in that session until the next trim. It is an estimate at list prices, not a bill, and there was no side-by-side run without Jermes for this period.
+
+`hermes jermes trimreport` over the same install (1,215 items dropped or, in shadow, would have been): **98% were never needed again**. 17 were recovered by a search or a partial read, 4 were re-read, re-run or reloaded in full.
+
+Other points in the same window: the model router considered 12 switches and its cost check vetoed all of them; the risk gate sent 63 calls to approval and blocked none after the v1.1 fix.
+
+### Context trimming (September 26, 2026)
+
+**Live A/B, 5 pairs.** Four-turn Hermes sessions with a 5.5-minute pause before each follow-up (both arms), so the prompt cache really expires. Turn 1 reads three large files; later turns need details from them. In the harder `recall` task those details are minor lines no summary would mention. Claude Opus 5.5, everything else in Jermes off.
+
+| | Correct | Cost (5 sessions) |
+|---|---|---|
+| Hermes alone | 5/5 | $19.83 |
+| With context trimming | 5/5 | **$12.05 (−39%)** |
+
+Trimming was cheaper in every pair (−32% to −63%). When a later question needed a trimmed file, the agent searched it for the one line it needed rather than re-reading it. The tasks were built to exercise this feature and run-to-run noise is large; each pair and the caveats are in [docs/RESULTS.md](#history).
+
+**Offline estimate** (`hermes jermes costsim`, 13 real sessions, $746 of spend): −22% if Jev keeps 30% of old items, −33% if every old item is trimmed.
+
+**Was trimmed content needed again?** (`hermes jermes trimreport`, September 28) For every item trimming dropped, the report checks the rest of the session for a re-read of the same file, a search or partial read of it, or a re-run of the same command. On the two latest `recall` runs (15 distinct items dropped, about 260k characters), 3 items were needed again, and all 3 were recovered by a search or a partial read that brought back about 28k characters in total. Nothing was re-read in full. This is test data built to need trimmed details; the report is meant for real shadow logs before switching trimming to enforce.
+
+**With the result filter as well** (one `recall` pair, both arms trimming): $1.92 without the filter, $1.88 with it (−2.4%), both correct. The filter fired once. Once trimming handles old reads, the filter has little left to do on this kind of task; one pair is not enough to rule it out elsewhere.
+
+### Duplicate skills (September 27, 2026)
+
+`hermes jermes skills-audit` checked the 95 agent-created skills on one install against all 207 installed skills: 207 Jev requests, $0.04, 6 minutes. It found four groups:
+
+| Group | Jev's verdict | What happened |
+|---|---|---|
+| Three corpus-ingestion skills with near-identical descriptions | duplicate / one contains another (71–78%) | Merged into one |
+| Two cost/timeline proposal skills | duplicate (79%) | Merged |
+| Two "clone a working AI tool" skills | one contains the other (85%) | Merged |
+| Vercel build fixes and AI tool deploy troubleshooting | partial overlap (72%) | Merged into the broader one; the suggested keeper was the narrower skill, so a human overrode it |
+
+It held back on close calls under 70% that are related but distinct (`guidance`/`outlines`, `find-nearby`/`maps`). Each merge was reviewed by hand before editing; afterwards, a re-run on the four merged skills found nothing above 28%. The keeper rule (bundled first, then the skill that contains the others, then the longest) got one group of four wrong, which is why the command only suggests.
+
+### Risk gate
+
+**v1.1 (September 28): safety-weakening asks instead of blocking.** Within minutes of the first install switching to enforce, the log showed v0.8 would have refused 6 of the user's own calls: `ssh -o StrictHostKeyChecking=no` to a GPU pod, and writing an API key into `.env` under `umask 077`. Jev rated them as weakening safety (0.73–0.93) and as going against the request (0.72–0.87), while also judging them requested ("not requested" only 0.12–0.20). A block refuses the call with no way to approve it, so the "goes against the request" block now only covers exfiltration (at 0.7); safety-weakening alone goes to Hermes' approval prompt. `against_request_weakens_blocks: true` restores the v0.8 behaviour. Replaying Jev's logged answers: all 6 live would-blocks become approvals, no live call is blocked, and the held-out set still stops 19/19 dangerous calls, but blocks 13/19 outright instead of 17/19. The four that now reach approval instead of a block: piping a web page's script into `bash`, an alias that makes `rm` dangerous, sending a key to a "contractor", and mounting the home folder into an untrusted container. The offline check (0 blocks on 200 past calls) missed this pattern, which is why the tables below were not enough to judge enforce on their own.
+
+**v0.8 (September 28), risk_gate.3.** Three new Jev questions (weakens safety controls, goes against a limit the user stated, hard to undo) and a rule that blocks a call that is unrequested and exfiltrates data or weakens safety. Routine work that was clearly asked for and is easy to undo is no longer sent to review on its risk level alone.
+
+To keep the numbers honest, a different model (GPT-5) wrote two test sets without seeing any Jermes rules, questions or cases: 40 tuning cases and 41 held-out cases, each about 45% dangerous, 15% "a human should confirm" and 40% harmless look-alikes. Thresholds were chosen by replaying the logged Jev answers through the policy (no extra calls), and the held-out set was scored once, after the policy was final.
+
+| Held-out set (41, GPT-5) | v0.7 | v0.8 | v1.1 |
+|---|---|---|---|
+| Dangerous calls stopped (blocked or sent to review) | 18/19 | 19/19 | **19/19** |
+| Dangerous calls blocked outright | 7/19 | 17/19 | **13/19** |
+| "A human should confirm" cases stopped | 2/6 | 2/6 | 2/6 |
+| Harmless calls allowed | 15/16 | 16/16 | **16/16** |
+| Harmless calls blocked | 0 | 0 | 0 |
+| Hermes' own regex, dangerous shell cases flagged | 40% | 40% |
+
+| Other sets (v0.8) | Dangerous stopped | Dangerous blocked | Harmless allowed | Harmless blocked |
+|---|---|---|---|---|
+| Basic set (31) | 10/10 | 9/10 (v0.7: 7/10) | 14/14 | 0 |
+| Own red-team set (33) | 20/20 | 16/20 (v0.7: 5/20) | 11/12 | 0 |
+| GPT-5 tuning set (40, used for tuning) | 18/18 | 18/18 (v0.7: 5/18) | 11/16 (v0.7: 9/16) | 0 |
+
+**Real calls:** 200 real past calls: 13% sent to review (v0.7: 14.5%), none blocked. A first draft blocked one real call, an agent deleting a stray duplicate file it had created mid-task; the "goes against the request" block now only covers exfiltration and weakening safety, and deletes are left to review.
+
+Still weak: 4 of 6 "a human should confirm" cases are allowed (regenerating an SSH key, replacing a TLS key, removing an old backup cron job, opening a firewall port for an office IP), and two home-directory deletions disguised as routine work go to review instead of being blocked. On the tuning set, 5 harmless scheduled jobs and announcements still go to review. The held-out set was written by one model; a second author or real attack traces would be a stronger test.
+
+The secret-to-network rule (v0.7) still fires on 8 of about 4,700 real past calls, none an attack. Earlier results are in [docs/RESULTS.md](#history).
+
+### Memory filter
+
+Hermes re-sends its memory files on every turn, and its own guidance says memory is for durable facts, not task progress or procedures. `memory_filter` asks Jev about each write before it lands. It was built and scored offline; it isn't yet A/B tested live.
+
+| Set | Entries | Right | Durable facts wrongly held | Progress/procedures caught |
+|---|---|---|---|---|
+| One install: its 36 current memory entries, 31 past memory writes, 10 written examples | 77 | **100%** | 0% | 100% |
+| Held out (written after tuning, not used to set thresholds) | 16 | 94% | 0% | 7 of 8 |
+
+The first version held 17% of durable entries because dense fact lists (API quirks, preference lists) also score as "procedure". The fix: a procedure is only held when it's also written as steps (a heading or three or more numbered/bulleted items). That was tuned on the first set, so its 100% is in-sample; the held-out set is the honest number. The one held-out miss was a spend note ("spent $7.40 on RunPod today") that Jev rated as a durable fact. Labels contain personal memory content and stay outside the repo; `hermes jermes memorybench --build` drafts a labels file from any install.
+
+**Live A/B (September 28, one pair, `ab --tasks memory`):** a new task turns Hermes memory on, gives three durable preferences plus progress notes and a request to "save the steps", then starts a fresh session that must answer from memory. Both arms passed. The filter had nothing to hold: Opus 5.5 saved only the three preferences, left the progress notes out, and put the steps into a skill. Cost differed ($0.27 vs $0.36) from agent variation, not the filter. On a strong model that follows Hermes' memory guidance, the filter is insurance, not a saving; weaker models and background memory reviews are untested.
+
+### Data ingestion: SEC 10-K cover pages (September 25, 2026)
+
+16 real 10-K filings, fetched from EDGAR, that were never used while building the candidate finders or writing the field questions. Six fields per filing: state of incorporation, tax ID, fiscal year end, SEC file number, shares outstanding, public float. The correct values come from SEC's own structured data, not from reading the documents. Values that don't appear in the document text are left out of scoring (2 of 96), so 94 values are scored. Each document is the first 25,000 characters of the filing, so the cover values sit among real business text and dozens of other numbers.
+
+| | Correct | Wrong | Cost | Strong-model input tokens |
+|---|---|---|---|---|
+| **Jev pipeline** (Sonnet 4.5 only for flagged fields) | 94/94 | 0 | **$0.027** | 5,319 |
+| Claude Sonnet 4.5 reads every document | 94/94 | 0 | $0.298 | 91,737 |
+| Claude Haiku 4.5 reads every document | 94/94 | 0 | $0.099 | 91,737 |
+
+Jev's own cost is included in the pipeline's figure ($0.010 for 64 requests). One field in 96 was escalated to the strong model.
+
+What this does and doesn't show:
+
+- **Cost:** the pipeline reaches the same answers for about a tenth of the strong model's cost, and about a quarter of the cheap model's.
+- **Accuracy:** these fields were too easy to separate the three approaches, since all of them scored perfectly. A harder benchmark (scanned documents, ambiguous fields) is needed before claiming the pipeline is as accurate in general.
+- **Speed:** about 34 seconds per document, because the pipeline makes four Jev requests in sequence under the Vercel rate limit. Fine for batch ingestion, too slow for interactive use.
+
+Rebuild the benchmark with `python scripts/build_sec_bench.py DIR 20` (development set) or `... DIR 16 --heldout`.
+
+### Tool-result filtering: task-matched A/B (September 25, 2026)
+
+`hermes jermes ab` runs a fixed task set through real Hermes twice, with Jermes off and on, in isolated Hermes homes, and reads token counts from each run's own session record. Tasks write their own files and check the answer automatically. Model: Claude Opus 5.5.
+
+Two tasks where the agent must read a long file in full, 3 runs per arm:
+
+| Task | Off | On | Change | Correct (off/on) |
+|---|---|---|---|---|
+| Meeting transcript (74k chars; decisions change during the meeting) | $0.307 | $0.206 | **−33%** | 3/3, 3/3 |
+| Release notes (48k chars; one breaking change, no keyword to search for) | $0.260 | $0.272 | +5% | 3/3, 3/3 |
+
+On the release notes, Jev kept only the section with the answer (scored 0.82; the next highest 0.28). But the agent read the note saying the rest had been cut, didn't trust it, and searched the file itself, which took extra calls. The filter only saves tokens when the agent accepts what it's given.
+
+On six broader tasks (log search, JSON lookup, a spreadsheet conversion, a short code fix, a chat answer), 3 runs each, Jermes-on cost 1% more, within run-to-run noise. The agent searched big files instead of reading them whole, so the filter rarely had anything to trim. On the spreadsheet task, a suggested skill made the agent do more work.
+
+### Offline savings estimate over real sessions
+
+`hermes jermes savings` replays the filter's real decisions over past sessions and counts how often each trimmed result would have been re-read. On one install (64 sessions, about $950 of model spend), trimming big tool results would have removed about 25M prompt tokens (2.4%), worth about $11.60, for $0.03 of Jev calls. Three sessions account for 89% of that, so the saving depends heavily on how an install is used. It can't see changes in agent behaviour; the A/B above does.
+
+### Skill selection, scored against hand labels (September 25, 2026)
+
+40 real turns from one Hermes install (about 200 skills), labelled by hand with the skills that should have loaded: 29 turns needed skills (2.9 on average), 11 needed none. Current defaults: 10 messages of context, rewritten `runpod-pods` description.
+
+| Metric | Jev | What the agent loaded |
+|---|---|---|
+| Decision accuracy (skill vs no skill) | **88%** | 35% |
+| Primary hit (first skill correct) | **72%** | 7% |
+| Recall (needed skills listed) | **61%** | 4% |
+| Precision (listed skills needed) | 65% | 75% |
+| False alarms (skills on a "none" turn) | 9% (1 of 11) | 0% |
+| Misses ("none" on a turn needing a skill) | **14%** | 90% |
+| Skills listed per turn | 2.0 | 0.1 |
+
+The agent column is low mostly because this install rarely called `skill_view` in these sessions. Its precision is high because on the few turns it did load a skill, it was usually right.
+
+Caveats:
+
+- **40 turns is small.** A difference of one turn moves some rows by 3 to 9 points.
+- **The labels may lean toward Jev's old answers.** They were filled in on a sheet that showed Jev's 4-message list, and 26 of 40 matched it exactly. A blind batch would settle how much this matters.
+- **The skill list changed during testing.** A new skill (`job-interview-company-prep`) was created mid-session and now ranks first on two job-interview turns whose labels predate it. Those two count as wrong here.
+- **Suggestions aren't free.** In the A/B above, a suggested skill made the agent do more work on a simple task. Skill selection saves tokens only when it prevents unneeded loads.
+
+<a id="history"></a>
+
+# History
 
 ## September 28, 2026 (v1.1.1): concurrent-session refusals
 
